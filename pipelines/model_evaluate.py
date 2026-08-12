@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import auc, precision_recall_curve, precision_score, recall_score
 
 # Import model architecture and dataset class from training script
-from train import MultimodalMaintenanceDataset, StreamingMultimodalTransformer
+from model_training import MultimodalMaintenanceDataset, StreamingMultimodalTransformer
 
 # Set seed for reproducibility
 torch.manual_seed(42)
