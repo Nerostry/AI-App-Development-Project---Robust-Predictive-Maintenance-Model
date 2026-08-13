@@ -1,57 +1,20 @@
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: predictive-maintenance-app
-  labels:
-    app: predictive-maintenance
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: predictive-maintenance
-  template:
-    metadata:
-      labels:
-        app: predictive-maintenance
-    spec:
-      containers:
-      - name: predictive-maintenance-container
-        image: your-docker-registry/predictive-maintenance:latest # Replace with your image repository path
-        imagePullPolicy: Always
-        
-        # Environment variables mirrored from Dockerfile
-        env:
-        - name: PYTHONDONTWRITEBYTECODE
-          value: "1"
-        - name: PYTHONUNBUFFERED
-          value: "1"
+# Step 1: Use an official Node.js base image
+FROM node:20-alpine
 
-        # Resource limits and requests to prevent pod evictions
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "500m"
-          limits:
-            memory: "2Gi"
-            cpu: "2000m"
+# Step 2: Set the working directory inside the container
+WORKDIR /app
 
-        # Persistent storage mounts for output/data directories defined in Dockerfile
-        volumeMounts:
-        - name: app-storage
-          mountPath: /app/datasets
-          subPath: datasets
-        - name: app-storage
-          mountPath: /app/ingested_datasets
-          subPath: ingested_datasets
-        - name: app-storage
-          mountPath: /app/uploads
-          subPath: uploads
-        - name: app-storage
-          mountPath: /app/models
-          subPath: models
+# Step 3: Copy package files first to leverage Docker layer caching
+COPY package*.json ./
 
-      # PVC storage configuration
-      volumes:
-      - name: app-storage
-        persistentVolumeClaim:
-          claimName: predictive-maintenance-pvc
+# Step 4: Install dependencies
+RUN npm install
+
+# Step 5: Copy the rest of application code
+COPY . .
+
+# Step 6: Expose the port application listens on (e.g., 3000)
+EXPOSE 3000
+
+# Step 7: Define the command to start application
+CMD ["npm", "start"]
