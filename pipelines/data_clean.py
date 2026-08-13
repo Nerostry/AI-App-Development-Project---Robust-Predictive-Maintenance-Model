@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 class PredictiveMaintenancePreprocessor:
-    """Handles dataset loading, merging, feature imputation using KNN,
+    """Handles combined dataset loading, feature imputation using KNN,
 
     and target engineering for Predictive Maintenance data.
     """
@@ -20,48 +20,25 @@ class PredictiveMaintenancePreprocessor:
         self.data_dir = Path(data_dir)
         self.df_combined: Optional[pd.DataFrame] = None
 
-    def load_and_merge(self) -> pd.DataFrame:
-        """Loads raw CSV files, converts timestamps, deduplicates records,
+    def load_data(self, filename: str = "PdM_combined.csv") -> pd.DataFrame:
+        """Loads the pre-combined CSV file, converts timestamps, and deduplicates records."""
+        file_path = self.data_dir / filename
 
-        and merges them into a single base DataFrame.
-        """
-        logging.info("Loading dataset files...")
-        file_map = {
-            "telemetry": self.data_dir / "PdM_telemetry.csv",
-            "machines": self.data_dir / "PdM_machines.csv",
-            "failures": self.data_dir / "PdM_failures.csv",
-            "errors": self.data_dir / "PdM_errors.csv",
-            "maint": self.data_dir / "PdM_maint.csv",
-        }
+        if not file_path.exists():
+            raise FileNotFoundError(f"Required combined dataset file not found: {file_path}")
 
-        # Validate file existence
-        for name, path in file_map.items():
-            if not path.exists():
-                raise FileNotFoundError(f"Required dataset file not found: {path}")
+        logging.info(f"Loading combined dataset from {file_path}...")
+        df = pd.read_csv(file_path)
 
-        # Read CSVs
-        dfs = {name: pd.read_csv(path) for name, path in file_map.items()}
+        # Deduplicate records
+        df = df.drop_duplicates()
 
-        # Deduplicate individual tables prior to merging
-        for name in dfs:
-            dfs[name] = dfs[name].drop_duplicates()
+        # Convert datetime column if present
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"])
 
-        # Convert datetime columns
-        for key in ["telemetry", "failures", "errors", "maint"]:
-            dfs[key]["datetime"] = pd.to_datetime(dfs[key]["datetime"])
-
-        logging.info("Merging datasets...")
-        # Step 1: Base merge (telemetry + machine static metadata)
-        merged = pd.merge(dfs["telemetry"], dfs["machines"], on="machineID", how="left")
-
-        # Step 2: Left joins with event tables
-        merged = pd.merge(merged, dfs["failures"], on=["datetime", "machineID"], how="left")
-        merged = pd.merge(merged, dfs["errors"], on=["datetime", "machineID"], how="left")
-        merged = pd.merge(merged, dfs["maint"], on=["datetime", "machineID"], how="left")
-
-        # Ensure no accidental duplicates were created during joins
-        self.df_combined = merged.drop_duplicates()
-        logging.info(f"Datasets successfully merged. Initial shape: {self.df_combined.shape}")
+        self.df_combined = df
+        logging.info(f"Dataset successfully loaded. Initial shape: {self.df_combined.shape}")
         return self.df_combined
 
     def impute_and_engineer_features(
@@ -74,7 +51,7 @@ class PredictiveMaintenancePreprocessor:
         using KNN, and creates the target binary flag `failed`.
         """
         if self.df_combined is None:
-            raise ValueError("Data has not been merged yet. Call `load_and_merge()` first.")
+            raise ValueError("Data has not been loaded yet. Call `load_data()` first.")
 
         df = self.df_combined.copy()
 
@@ -90,16 +67,23 @@ class PredictiveMaintenancePreprocessor:
         if feature_cols is None:
             feature_cols = ["volt", "rotate", "pressure", "vibration", "model", "age"]
 
+        # Filter feature_cols to only those available in the DataFrame
+        available_features = [col for col in feature_cols if col in df.columns]
+
         # 2. Identify missing target values associated with error events
         train_mask = df["comp_failure"].notna()
-        target_mask = df["comp_failure"].isna() & df["errorID"].notna()
+        target_mask = df["comp_failure"].isna() & df["errorID"].notna() if "errorID" in df.columns else pd.Series(False, index=df.index)
 
         # 3. Perform KNN Imputation if missing targets exist
         if target_mask.sum() > 0 and train_mask.sum() > 0:
             logging.info(f"Imputing {target_mask.sum()} missing component failure records using KNN...")
 
             # Feature Encoding & Scaling
-            X_encoded = pd.get_dummies(df[feature_cols], columns=["model"], drop_first=True)
+            if "model" in available_features:
+                X_encoded = pd.get_dummies(df[available_features], columns=["model"], drop_first=True)
+            else:
+                X_encoded = pd.get_dummies(df[available_features], drop_first=True)
+
             scaler = StandardScaler()
             X_scaled = pd.DataFrame(
                 scaler.fit_transform(X_encoded),
@@ -126,7 +110,7 @@ class PredictiveMaintenancePreprocessor:
         self.df_combined = df
         return self.df_combined
 
-    def save(self, output_path: Union[str, Path] = "df_combined.csv") -> Path:
+    def save(self, output_path: Union[str, Path] = "df_combined_processed.csv") -> Path:
         """Saves the final clean dataset to a CSV file."""
         if self.df_combined is None:
             raise ValueError("No DataFrame available to save. Run pipeline processing first.")
@@ -136,9 +120,13 @@ class PredictiveMaintenancePreprocessor:
         logging.info(f"Saved processed dataset to: {out_file.resolve()}")
         return out_file
 
-    def run_pipeline(self, output_path: Union[str, Path] = "df_combined.csv") -> pd.DataFrame:
-        """Executes the full pipeline sequentially: load/merge -> impute -> save."""
-        self.load_and_merge()
+    def run_pipeline(
+        self,
+        input_filename: str = "PdM_combined.csv",
+        output_path: Union[str, Path] = "df_combined_processed.csv",
+    ) -> pd.DataFrame:
+        """Executes the full pipeline sequentially: load -> impute -> save."""
+        self.load_data(filename=input_filename)
         self.impute_and_engineer_features()
         self.save(output_path=output_path)
         return self.df_combined
@@ -149,5 +137,8 @@ if __name__ == "__main__":
     # Initialize processor with data directory
     processor = PredictiveMaintenancePreprocessor(data_dir="/content")
 
-    # Run the complete end-to-end processing pipeline
-    processed_df = processor.run_pipeline(output_path="df_combined.csv")
+    # Run the complete end-to-end processing pipeline on PdM_combined.csv
+    processed_df = processor.run_pipeline(
+        input_filename="PdM_combined.csv",
+        output_path="df_combined_processed.csv",
+    )
