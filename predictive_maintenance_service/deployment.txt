@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictive-maintenance-app
+  labels:
+    app: predictive-maintenance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predictive-maintenance
+  template:
+    metadata:
+      labels:
+        app: predictive-maintenance
+    spec:
+      containers:
+      - name: predictive-maintenance-container
+        # Replace with your actual container registry image path and tag
+        image: your-docker-registry/predictive-maintenance:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        # Optional: Override the default CMD if running a server or worker process
+        # command: ["python", "data_ingestion.py"]
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: app-storage
+          mountPath: /app/datasets
+        - name: ingested-storage
+          mountPath: /app/ingested_datasets
+        - name: uploads-storage
+          mountPath: /app/uploads
+        - name: models-storage
+          mountPath: /app/models
+      volumes:
+      - name: app-storage
+        emptyDir: {}
+      - name: ingested-storage
+        emptyDir: {}
+      - name: uploads-storage
+        emptyDir: {}
+      - name: models-storage
+        emptyDir: {}
