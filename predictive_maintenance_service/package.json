@@ -1,11 +1,11 @@
-# Data Processing & ML Core
-numpy
-pandas
-scikit-learn
-
-# Model & Computer Vision / YOLO
-ultralytics
-opencv-python-headless
-
-# Messaging / Streaming
-kafka-python
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  }
+}
