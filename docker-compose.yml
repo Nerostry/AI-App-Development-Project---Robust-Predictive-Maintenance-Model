@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  model-service:
+    build:
+      context: ./microservice_1
+    ports:
+      - "8000:8000"
+
+  ui-service:
+    build:
+      context: ./microservice_2_ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - model-service
