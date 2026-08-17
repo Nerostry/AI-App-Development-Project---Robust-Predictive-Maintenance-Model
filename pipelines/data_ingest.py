@@ -9,7 +9,6 @@ import pandas as pd
 
 class DataIngestor:
     """Handles dataset discovery, multi-format file loading, ZIP archive extraction,
-
     and output caching to CSV.
     """
 
@@ -27,9 +26,9 @@ class DataIngestor:
 
     def __init__(
         self,
-        datasets_dir: Union[str, Path] = "datasets",
-        output_dir: Union[str, Path] = "ingested_datasets",
-        extract_dir: Union[str, Path] = "extracted_data",
+        datasets_dir: Union[str, Path] = "datasets/raw_datasets",
+        output_dir: Union[str, Path] = "datasets/ingested_dataset",
+        extract_dir: Union[str, Path] = "datasets/extracted_temp",
     ):
         self.datasets_path = Path(datasets_dir)
         self.output_path = Path(output_dir)
@@ -40,7 +39,7 @@ class DataIngestor:
         if not self.datasets_path.exists():
             raise FileNotFoundError(
                 f"Directory '{self.datasets_path.resolve()}' does not exist. "
-                f"Please create it and place your dataset files inside."
+                f"Please verify the folder path exists."
             )
 
         self.output_path.mkdir(parents=True, exist_ok=True)
@@ -84,7 +83,6 @@ class DataIngestor:
                     try:
                         df = self._load_single_file(full_path)
                         if df is not None:
-                            # Use file stem as standard key name
                             dataframes[full_path.stem] = df
                     except Exception as e:
                         print(f"[WARN] Skipped '{fname}': {e}")
@@ -119,13 +117,6 @@ class DatasetCombiner:
     """Encapsulates loading, timestamp parsing, and left-joining Predictive Maintenance datasets."""
 
     def __init__(self, data_sources: Union[str, Path, Dict[str, pd.DataFrame]]):
-        """Parameters:
-
-        -----------
-        data_sources : Union[str, Path, Dict[str, pd.DataFrame]]
-            Either a directory path containing the CSVs or a dictionary
-            of pre-loaded DataFrames (e.g. from DataIngestor).
-        """
         if isinstance(data_sources, (str, Path)):
             self.dfs = self._load_from_directory(Path(data_sources))
         elif isinstance(data_sources, dict):
@@ -157,11 +148,7 @@ class DatasetCombiner:
                 )
 
     def combine(self) -> pd.DataFrame:
-        """Merges telemetry, machine metadata, failures, errors, and maintenance records
-
-        into a single consolidated DataFrame.
-        """
-        # Normalize key lookup names
+        """Merges telemetry, machine metadata, failures, errors, and maintenance records."""
         normalized_dfs = {
             k.lower().replace("pdm_", "").replace("_ingested", ""): v
             for k, v in self.dfs.items()
@@ -204,9 +191,10 @@ class DatasetCombiner:
 
 # --- Main Execution Pipeline ---
 if __name__ == "__main__":
-    # 1. Ingest raw datasets (handles zip files, multi-formats, and saves clean copies)
+    # 1. Ingest raw datasets from 'datasets/raw_datasets' and output to 'datasets/ingested_dataset'
     ingestor = DataIngestor(
-        datasets_dir="datasets", output_dir="ingested_datasets"
+        datasets_dir="datasets/raw_datasets",
+        output_dir="datasets/ingested_dataset",
     )
     ingested_data = ingestor.run()
 
@@ -214,7 +202,7 @@ if __name__ == "__main__":
     combiner = DatasetCombiner(data_sources=ingested_data)
     combined_df = combiner.combine()
 
-    # 3. Save final merged dataset
-    output_merged_path = Path("ingested_datasets/PdM_combined.csv")
+    # 3. Save final merged dataset into 'datasets/ingested_dataset'
+    output_merged_path = Path("datasets/ingested_dataset/PdM_combined.csv")
     combined_df.to_csv(output_merged_path, index=False)
     print(f"Saved merged dataset to '{output_merged_path.resolve()}'")
