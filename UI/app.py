@@ -1,8 +1,7 @@
-import streamlit as st
-import pandas as pd
-import requests
 import os
 import requests
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 MODEL_SERVICE_HOST = os.getenv("MODEL_SERVICE_HOST", "localhost")
@@ -13,7 +12,7 @@ st.set_page_config(page_title="Turbofan Predictive Maintenance", layout="wide")
 st.title("🛠️ Turbofan Engine Health & Predictive Maintenance")
 st.write("Upload NASA Turbofan engine sensor data to generate real-time maintenance predictions.")
 
-# 1. File Upload Component
+# File Upload Component
 uploaded_file = st.sidebar.file_uploader("Upload Sensor CSV", type=["csv"])
 
 if uploaded_file is not None:
@@ -23,7 +22,9 @@ if uploaded_file is not None:
     
     if st.button("Run Prediction via Microservice 1"):
         with st.spinner("Communicating with Model Microservice..."):
-            payload = {"data": df.to_dict(orient="records")}
+            # Clean NaN and infinite values before converting to dict/JSON
+            df_cleaned = df.replace([np.inf, -np.inf], np.nan).fillna(0)
+            payload = {"data": df_cleaned.to_dict(orient="records")}
             
             try:
                 response = requests.post(MODEL_SERVICE_URL, json=payload, timeout=10)
@@ -33,10 +34,16 @@ if uploaded_file is not None:
                     st.success("Inference Complete!")
                     st.subheader("📊 Maintenance Assessment")
                     
+                    # Look up backend keys safely with fallback defaults
+                    predicted_rul = results.get("predicted_RUL", results.get("rul", "N/A"))
+                    maint_req = results.get("maintenance_required", False)
+                    risk_label = "High Risk" if maint_req else results.get("risk_level", "Low Risk")
+                    health_score = results.get("health_score", 100)
+
                     col1, col2, col3 = st.columns(3)
-                    col1.metric("Predicted RUL (Cycles)", results.get("rul", "N/A"))
-                    col2.metric("Failure Risk Level", results.get("risk_level", "N/A"))
-                    col3.metric("Engine Health Index", f"{results.get('health_score', 100)}%")
+                    col1.metric("Predicted RUL (Cycles)", predicted_rul)
+                    col2.metric("Failure Risk Level", risk_label)
+                    col3.metric("Engine Health Index", f"{health_score}%")
                     
                     st.subheader("📉 Sensor Degradation Trend")
                     sensor_cols = [col for col in df.columns if 'sensor' in col.lower() or 'setting' in col.lower()]
