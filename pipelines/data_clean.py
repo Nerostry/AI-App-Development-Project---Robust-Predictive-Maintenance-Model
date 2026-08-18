@@ -12,11 +12,17 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 class PredictiveMaintenancePreprocessor:
     """Handles combined dataset loading, feature imputation using KNN,
+
     and target engineering for Predictive Maintenance data.
     """
 
-    def __init__(self, data_dir: Union[str, Path] = "ingested_datasets"):
+    def __init__(
+        self,
+        data_dir: Union[str, Path] = "datasets/ingested_dataset",
+        output_dir: Union[str, Path] = "datasets/clean_dataset",
+    ):
         self.data_dir = Path(data_dir)
+        self.output_dir = Path(output_dir)
         self.df_combined: Optional[pd.DataFrame] = None
 
     def load_data(self, filename: str = "PdM_combined.csv") -> pd.DataFrame:
@@ -25,7 +31,7 @@ class PredictiveMaintenancePreprocessor:
 
         if not file_path.exists():
             raise FileNotFoundError(
-                f"Required combined dataset file not found: {file_path}"
+                f"Required combined dataset file not found: {file_path.resolve()}"
             )
 
         logging.info(f"Loading combined dataset from {file_path}...")
@@ -50,6 +56,7 @@ class PredictiveMaintenancePreprocessor:
         n_neighbors: int = 5,
     ) -> pd.DataFrame:
         """Combines failure/maintenance component columns, imputes missing component failures
+
         using KNN, and creates the target binary flag `failed`.
         """
         if self.df_combined is None:
@@ -134,21 +141,18 @@ class PredictiveMaintenancePreprocessor:
     def save(
         self, output_path: Optional[Union[str, Path]] = None
     ) -> Path:
-        """Saves the final clean dataset to a CSV file inside the ingestion folder by default."""
+        """Saves the final clean dataset to a CSV file in clean_dataset/."""
         if self.df_combined is None:
             raise ValueError(
                 "No DataFrame available to save. Run pipeline processing first."
             )
 
-        # Default to saving inside self.data_dir if no output path is explicitly given
         if output_path is None:
-            out_file = self.data_dir / "df_combined_processed.csv"
+            out_file = self.output_dir / "PdM_combined_cleaned.csv"
         else:
             out_file = Path(output_path)
 
-        # Ensure directory exists before saving
         out_file.parent.mkdir(parents=True, exist_ok=True)
-
         self.df_combined.to_csv(out_file, index=False)
         logging.info(f"Saved processed dataset to: {out_file.resolve()}")
         return out_file
@@ -156,23 +160,23 @@ class PredictiveMaintenancePreprocessor:
     def run_pipeline(
         self,
         input_filename: str = "PdM_combined.csv",
-        output_filename: str = "df_combined_processed.csv",
+        output_filename: str = "PdM_combined_cleaned.csv",
     ) -> pd.DataFrame:
         """Executes the full pipeline sequentially: load -> impute -> save."""
         self.load_data(filename=input_filename)
         self.impute_and_engineer_features()
-        self.save(output_path=self.data_dir / output_filename)
+        self.save(output_path=self.output_dir / output_filename)
         return self.df_combined
 
 
-# --- Execution ---
 if __name__ == "__main__":
-    # Initialize processor pointing to 'ingested_datasets' folder
-    # (Use Path("/content/ingested_datasets") if running specifically in Google Colab)
-    processor = PredictiveMaintenancePreprocessor(data_dir="ingested_datasets")
+    # Points automatically to datasets/ingested_dataset and datasets/clean_dataset
+    processor = PredictiveMaintenancePreprocessor(
+        data_dir="datasets/ingested_dataset",
+        output_dir="datasets/clean_dataset",
+    )
 
-    # Run the complete end-to-end processing pipeline on PdM_combined.csv
     processed_df = processor.run_pipeline(
         input_filename="PdM_combined.csv",
-        output_filename="df_combined_processed.csv",
+        output_filename="PdM_combined_cleaned.csv",
     )
