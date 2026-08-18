@@ -166,13 +166,18 @@ class DataIngestor:
         return self.SUPPORTED_LOADERS[ext](file_path)
 
     def _save_dataframes(self, dataframes: Dict[str, pd.DataFrame]) -> None:
-        """Saves processed tabular DataFrames as standard CSVs in output directory."""
+        """Saves non-PdM tabular DataFrames as standard CSVs in output directory."""
         if not dataframes:
             print("\n[INFO] No tabular datasets to save.")
             return
 
         print(f"\n[INFO] Saving ingested datasets to '{self.output_path.resolve()}'...")
         for key, df in dataframes.items():
+            # Skip saving individual PdM component tables to disk
+            normalized = key.lower()
+            if any(pdm_part in normalized for pdm_part in ["telemetry", "machines", "failures", "errors", "maint", "pdm_"]):
+                continue
+
             clean_name = f"{key}_ingested.csv"
             save_file = self.output_path / clean_name
             df.to_csv(save_file, index=False)
