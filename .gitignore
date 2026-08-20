@@ -3,4 +3,11 @@ uploads/*
 !uploads/.gitkeep
 datasets/
 ingested_datasets/
-uploads/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pt
+*.bin
+*.db
+.DS_Store
