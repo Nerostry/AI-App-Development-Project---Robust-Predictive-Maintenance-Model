@@ -17,7 +17,7 @@ def resolve_machine_id_col(df: pd.DataFrame) -> str:
 
 
 def clean_telemetry(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean telemetry data: parse datetimes, drop duplicates, sort, and interpolate/fill."""
+    """Clean telemetry data without introducing future-value leakage."""
     df = df.copy()
     id_col = resolve_machine_id_col(df)
 
@@ -368,7 +368,11 @@ def split_and_scale_features(
     split_date: str = "2015-10-01",
 ) -> tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
     """
-    Time-based train/test split with strictly leakage-free feature scaling.
+    Time-based train/test split with strictly leakage-free imputation and scaling.
+
+    Missing feature values are imputed using medians calculated from the
+    training partition only. This is necessary because the first observation
+    of each machine has no valid historical rolling-window value.
     """
 
     id_col = resolve_machine_id_col(df)
