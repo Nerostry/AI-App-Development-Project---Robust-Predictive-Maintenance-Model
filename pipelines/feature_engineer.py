@@ -1,96 +1,307 @@
 import os
-from pathlib import Path
-import joblib
+import numpy as np
 import pandas as pd
+from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 
-# ==========================================
-# 1. Resolve Project Paths
-# ==========================================
-# Resolves the project root relative to this file's location (.../pipelines/..)
-BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Input directory
-CLEAN_DIR = BASE_DIR / "datasets" / "clean_dataset"
-maint_path = CLEAN_DIR / "cleaned_maintenance_dataset.csv"
-pdm_path = CLEAN_DIR / "PdM_combined_cleaned.csv"
 
-# Output directory: datasets/model_train_dataset
-OUTPUT_DIR = BASE_DIR / "datasets" / "model_train_dataset"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ==========================================
-# 2. Load Cleaned Datasets
-# ==========================================
-print(f"Loading datasets from {CLEAN_DIR}...")
-df_maint = pd.read_csv(maint_path)
-df_pdm = pd.read_csv(pdm_path)
-
-# PdM_combined_cleaned is the main telemetry + failure dataset
-df_combined = df_pdm.copy()
-
-# ==========================================
-# 3. Preprocessing & One-Hot Encoding
-# ==========================================
-if 'machineID' in df_combined.columns:
-    df_combined = df_combined.drop(columns=['machineID'])
-
-# One-Hot Encoding on categorical columns
-ohe_cols = [col for col in ['model', 'errorID', 'comp_failure'] if col in df_combined.columns]
-if ohe_cols:
-    df_combined = pd.get_dummies(
-        df_combined,
-        columns=ohe_cols,
-        dtype=int,
+def resolve_machine_id_col(df: pd.DataFrame) -> str:
+    """Detects whether the machine ID column is 'machineID' or 'machine_id'."""
+    for candidate in ["machineID", "machine_id"]:
+        if candidate in df.columns:
+            return candidate
+    raise KeyError(
+        f"No machine ID column found. Available columns: {list(df.columns)}"
     )
 
-# ==========================================
-# 4. Feature Engineering for Numerical Columns
-# ==========================================
-numerical_cols = ['volt', 'rotate', 'pressure', 'vibration', 'age']
-numerical_cols = [c for c in numerical_cols if c in df_combined.columns]
 
-# Ensure chronological ordering if datetime exists
-if 'datetime' in df_combined.columns:
-    df_combined['datetime'] = pd.to_datetime(df_combined['datetime'])
-    df_combined = df_combined.sort_values('datetime').reset_index(drop=True)
 
-# Rolling statistics (window = 3)
-window = 3
-for col in numerical_cols:
-    df_combined[f'{col}_roll_mean_{window}'] = (
-        df_combined[col].rolling(window=window, min_periods=1).mean()
+
+def clean_telemetry(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean telemetry data: parse datetimes, drop duplicates, sort, and interpolate/fill."""
+    df = df.copy()
+    id_col = resolve_machine_id_col(df)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.drop_duplicates()
+    df = df.sort_values(by=[id_col, "datetime"]).reset_index(drop=True)
+
+
+    sensor_cols = ["volt", "rotate", "pressure", "vibration"]
+    sensor_cols = [c for c in sensor_cols if c in df.columns]
+    df[sensor_cols] = df.groupby(id_col)[sensor_cols].transform(
+        lambda grp: grp.ffill().bfill()
     )
-    df_combined[f'{col}_roll_std_{window}'] = (
-        df_combined[col].rolling(window=window, min_periods=1).std().fillna(0)
+    return df
+
+
+
+
+def clean_errors(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean error logs: parse datetimes, drop duplicates, and sort."""
+    df = df.copy()
+    id_col = resolve_machine_id_col(df)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.drop_duplicates()
+    return df.sort_values(by=[id_col, "datetime"]).reset_index(drop=True)
+
+
+
+
+def clean_failures(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean failure records: parse datetimes, drop duplicates, and sort."""
+    df = df.copy()
+    id_col = resolve_machine_id_col(df)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.drop_duplicates()
+    return df.sort_values(by=[id_col, "datetime"]).reset_index(drop=True)
+
+
+
+
+def clean_maint(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean maintenance logs: parse datetimes, drop duplicates, and sort."""
+    df = df.copy()
+    id_col = resolve_machine_id_col(df)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.drop_duplicates()
+    return df.sort_values(by=[id_col, "datetime"]).reset_index(drop=True)
+
+
+
+
+def clean_machines(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean machine metadata: drop duplicates, strip whitespace, handle missing values."""
+    df = df.copy()
+    df = df.drop_duplicates()
+
+
+    if "model" in df.columns:
+        df["model"] = df["model"].astype(str).str.strip()
+        df["model"] = df["model"].replace("nan", np.nan).fillna("Unknown")
+
+
+    if "age" in df.columns:
+        df["age"] = pd.to_numeric(df["age"], errors="coerce")
+        df["age"] = df["age"].fillna(df["age"].median()).astype(int)
+
+
+    return df
+
+
+
+
+def build_unified_dataset(
+    telemetry: pd.DataFrame,
+    errors: pd.DataFrame,
+    failures: pd.DataFrame,
+    maint: pd.DataFrame,
+    machines: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge all cleaned datasets into a single unified hourly DataFrame."""
+    merged = telemetry.copy()
+    id_col = resolve_machine_id_col(merged)
+
+
+    # 1. Error Events (One-Hot Encoded)
+    if not errors.empty:
+        errors_encoded = pd.get_dummies(
+            errors, columns=["errorID"], prefix="err", dtype=int
+        )
+        errors_agg = (
+            errors_encoded.groupby([id_col, "datetime"]).max().reset_index()
+        )
+        merged = pd.merge(
+            merged, errors_agg, on=[id_col, "datetime"], how="left"
+        )
+        err_cols = [c for c in merged.columns if c.startswith("err_")]
+        merged[err_cols] = merged[err_cols].fillna(0).astype(int)
+
+
+    # 2. Failure Events
+    if not failures.empty:
+        failures_renamed = failures.rename(columns={"failure": "comp_failure"})
+        merged = pd.merge(
+            merged,
+            failures_renamed[[id_col, "datetime", "comp_failure"]],
+            on=[id_col, "datetime"],
+            how="left",
+        )
+        merged["comp_failure"] = merged["comp_failure"].fillna("none")
+    else:
+        merged["comp_failure"] = "none"
+
+
+    # 3. Maintenance Events
+    if not maint.empty:
+        maint_encoded = pd.get_dummies(
+            maint, columns=["comp"], prefix="maint", dtype=int
+        )
+        maint_agg = (
+            maint_encoded.groupby([id_col, "datetime"]).max().reset_index()
+        )
+        merged = pd.merge(
+            merged, maint_agg, on=[id_col, "datetime"], how="left"
+        )
+        maint_cols = [c for c in merged.columns if c.startswith("maint_")]
+        merged[maint_cols] = merged[maint_cols].fillna(0).astype(int)
+
+
+    # 4. Static Machine Metadata
+    if not machines.empty:
+        merged = pd.merge(merged, machines, on=id_col, how="left")
+
+
+    return merged
+
+
+
+
+def engineer_features(df: pd.DataFrame, prediction_window_hours: int = 24) -> pd.DataFrame:
+    """
+    Compute lag-based rolling features without lookahead bias and
+    formulate the predictive maintenance target window.
+    """
+    df = df.copy()
+    id_col = resolve_machine_id_col(df)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values(by=[id_col, "datetime"]).reset_index(drop=True)
+
+
+    # 1. Target: Failure in the NEXT N hours (Predictive Maintenance formulation)
+    if "comp_failure" in df.columns:
+        immediate_failure = (
+            df["comp_failure"].notna() & (df["comp_failure"] != "none")
+        ).astype(int)
+    elif "failed" in df.columns:
+        immediate_failure = df["failed"].astype(int)
+    else:
+        immediate_failure = pd.Series(0, index=df.index)
+
+
+    # Give the Series a name so groupby/apply can reference it by column name
+    immediate_failure.name = "_immediate_failure"
+    df["_immediate_failure"] = immediate_failure
+
+
+    # Backward rolling sum inverted into future lookup
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=prediction_window_hours)
+    df["target_failure_window"] = (
+        df.groupby(id_col)["_immediate_failure"]
+        .apply(lambda s: (s.rolling(window=indexer, min_periods=1).sum() > 0).astype(int))
+        .reset_index(level=0, drop=True)
+    )
+    df = df.drop(columns=["_immediate_failure"])
+
+
+    # 2. Lagged Rolling Telemetry (Shift by 1 to prevent current-step lookahead)
+    sensor_cols = [c for c in ["volt", "rotate", "pressure", "vibration"] if c in df.columns]
+    for col in sensor_cols:
+        for window in [3, 24]:
+            # Shift 1 hour back so statistics strictly reflect the past
+            df[f"{col}_mean_{window}h"] = (
+                df.groupby(id_col)[col]
+                .transform(lambda s: s.shift(1).rolling(window, min_periods=1).mean())
+                .bfill()
+            )
+            df[f"{col}_std_{window}h"] = (
+                df.groupby(id_col)[col]
+                .transform(lambda s: s.shift(1).rolling(window, min_periods=1).std())
+                .fillna(0)
+            )
+
+
+    # 3. Categorical Encoding
+    if "model" in df.columns:
+        df = pd.get_dummies(df, columns=["model"], drop_first=True, dtype=int)
+
+
+    return df
+
+
+
+
+def split_and_scale_features(
+    df: pd.DataFrame, split_date: str = "2015-10-01"
+) -> tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
+    """
+    Time-based train/test split with strictly leakage-free feature scaling.
+    """
+    id_col = resolve_machine_id_col(df)
+    non_feature_cols = [
+        "datetime",
+        id_col,
+        "failed",
+        "comp_failure",
+        "target_failure_window",
+    ]
+
+
+    # Only keep columns that are actually numeric — this drops leftover
+    # string/object columns (e.g. 'errorid' with values like 'error1')
+    # that were never one-hot encoded, and any comp_failure_* dummy cols.
+    candidate_cols = [
+        c for c in df.columns
+        if c not in non_feature_cols and not c.startswith("comp_failure_")
+    ]
+    feature_cols = [
+        c for c in candidate_cols
+        if pd.api.types.is_numeric_dtype(df[c])
+    ]
+
+
+    dropped_cols = [c for c in candidate_cols if c not in feature_cols]
+    if dropped_cols:
+        print(f"[WARN] Dropping non-numeric columns from features: {dropped_cols}")
+
+
+    train_mask = df["datetime"] < pd.to_datetime(split_date)
+    train_df = df[train_mask].copy().reset_index(drop=True)
+    test_df = df[~train_mask].copy().reset_index(drop=True)
+
+
+    # Fit scaler solely on training features
+    scaler = StandardScaler()
+    train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    test_df[feature_cols] = scaler.transform(test_df[feature_cols])
+
+
+    return train_df, test_df, scaler
+
+
+
+
+if __name__ == "__main__":
+    # Resolve the project root (one level up from pipelines/)
+    project_root = Path(__file__).resolve().parents[1]
+
+
+    # Target path: datasets/clean_dataset/PdM_combined_cleaned.csv
+    input_file = project_root / "datasets" / "clean_dataset" / "PdM_combined_cleaned.csv"
+    output_dir = project_root / "datasets" / "model_train_dataset"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+
+    print(f"Loading dataset from: {input_file}")
+    cleaned_df = pd.read_csv(input_file)
+    print(f"Columns found: {list(cleaned_df.columns)}")
+
+
+    print("Engineering features...")
+    engineered_df = engineer_features(cleaned_df, prediction_window_hours=24)
+
+
+    print("Performing temporal split and scaling...")
+    train_data, test_data, scaler = split_and_scale_features(
+        engineered_df, split_date="2015-10-01"
     )
 
-# Lag features (t-1)
-for col in numerical_cols:
-    df_combined[f'{col}_lag_1'] = df_combined[col].shift(1).fillna(df_combined[col])
 
-# Standard Scaling
-engineered_cols = numerical_cols + [
-    f'{col}_roll_mean_{window}' for col in numerical_cols
-] + [
-    f'{col}_roll_std_{window}' for col in numerical_cols
-] + [
-    f'{col}_lag_1' for col in numerical_cols
-]
-engineered_cols = [c for c in engineered_cols if c in df_combined.columns]
+    train_out = output_dir / "train_scaled.csv"
+    test_out = output_dir / "test_scaled.csv"
 
-scaler = StandardScaler()
-df_combined[engineered_cols] = scaler.fit_transform(df_combined[engineered_cols])
 
-# ==========================================
-# 5. Export Artifacts to model_train_dataset
-# ==========================================
-scaler_output_path = OUTPUT_DIR / "numerical_feature_scaler.pkl"
-dataset_output_path = OUTPUT_DIR / "model_dataset.csv"
-
-joblib.dump(scaler, scaler_output_path)
-print(f"Saved fitted StandardScaler to: {scaler_output_path}")
-
-df_combined.to_csv(dataset_output_path, index=False)
-print(f"Saved processed dataset to: {dataset_output_path}")
-print(f"Final dataset shape: {df_combined.shape}")
+    train_data.to_csv(train_out, index=False)
+    test_data.to_csv(test_out, index=False)
+    print(f"Saved outputs to:\n - {train_out}\n - {test_out}")
