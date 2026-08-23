@@ -90,6 +90,10 @@ Use this method for production-level deployment with scaling capabilities.
 
 ---
 
+## diagram
+<img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/bcb1dc09-956b-4328-b6df-0b4b32a59464" />
+
+
 ## ⚠️ Known Issues & Limitations
 *   **Model Latency:** The YOLO integration currently introduces a slight delay (~500ms) during peak load times. 
 *   **Data Upload Limits:** The Streamlit frontend currently caps batch CSV uploads at 200MB to prevent memory timeouts.
@@ -108,7 +112,6 @@ Use this method for production-level deployment with scaling capabilities.
 ├── Dockerfile                      # Application container blueprint
 ├── docker-compose.yml              # Multi-container orchestration
 └── deployment.yml                  # Kubernetes deployment configuration
----
 ## diagram
 <img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/bcb1dc09-956b-4328-b6df-0b4b32a59464" />
 
