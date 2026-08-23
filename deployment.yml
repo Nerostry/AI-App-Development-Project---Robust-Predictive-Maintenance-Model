@@ -1,10 +1,39 @@
+# deployment.yml
+#
+# Kubernetes deployment for:
+#   - ZooKeeper
+#   - Kafka
+#   - Ingest service
+#   - Data processing / YOLO service
+#   - Predictive maintenance / FastAPI service
+#   - Streamlit UI
+#
+# IMPORTANT:
+# Replace YOUR_DOCKER_REGISTRY with your actual registry.
+#
+# Example:
+#   docker build -t YOUR_DOCKER_REGISTRY/ingest-service:latest -f Dockerfile .
+#   docker build -t YOUR_DOCKER_REGISTRY/data-processing-service:latest ./data_processing_service
+#   docker build -t YOUR_DOCKER_REGISTRY/predictive-maintenance-service:latest -f predictive_maintenance_service/Dockerfile .
+#   docker build -t YOUR_DOCKER_REGISTRY/ui-service:latest ./User_InterFace
+
+
+# ============================================================
+# NAMESPACE
+# ============================================================
+
 apiVersion: v1
 kind: Namespace
 metadata:
   name: predictive-maintenance
+
+
+# ============================================================
+# UPLOAD STORAGE
+# Used by ingest-service and data-processing-service
+# ============================================================
+
 ---
-# Shared storage for uploaded images. Both ingest and processing run with one
-# replica, so ReadWriteOnce is sufficient for this deployment.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -16,10 +45,13 @@ spec:
   resources:
     requests:
       storage: 5Gi
----
+
+
 # ============================================================
 # ZOOKEEPER
 # ============================================================
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,24 +61,39 @@ metadata:
     app: zookeeper
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: zookeeper
+
   template:
     metadata:
       labels:
         app: zookeeper
+
     spec:
       containers:
         - name: zookeeper
           image: confluentinc/cp-zookeeper:7.6.0
+
           ports:
             - containerPort: 2181
+
           env:
             - name: ZOOKEEPER_CLIENT_PORT
               value: "2181"
+
             - name: ZOOKEEPER_TICK_TIME
               value: "2000"
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
 ---
 apiVersion: v1
 kind: Service
@@ -56,14 +103,20 @@ metadata:
 spec:
   selector:
     app: zookeeper
+
   ports:
     - name: client
       port: 2181
       targetPort: 2181
----
+
+  type: ClusterIP
+
+
 # ============================================================
 # KAFKA
 # ============================================================
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -71,70 +124,117 @@ metadata:
   namespace: predictive-maintenance
   labels:
     app: kafka
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: kafka
+
   template:
     metadata:
       labels:
         app: kafka
+
     spec:
+
+      # Wait for ZooKeeper before starting Kafka
       initContainers:
         - name: wait-for-zookeeper
           image: busybox:1.36
+
           command:
             - sh
             - -c
-            - until nc -z zookeeper 2181; do echo 'Waiting for ZooKeeper'; sleep 2; done
+            - |
+              until nc -z zookeeper 2181; do
+                echo "Waiting for ZooKeeper..."
+                sleep 2
+              done
+
       containers:
         - name: kafka
           image: confluentinc/cp-kafka:7.6.0
+
           ports:
             - containerPort: 9092
             - containerPort: 29092
+
           env:
+
             - name: KAFKA_BROKER_ID
               value: "1"
+
             - name: KAFKA_ZOOKEEPER_CONNECT
               value: "zookeeper:2181"
+
+            # Kafka listeners
             - name: KAFKA_LISTENERS
               value: "PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092"
+
+            # Internal Kubernetes clients use kafka:29092
             - name: KAFKA_ADVERTISED_LISTENERS
               value: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+
             - name: KAFKA_INTER_BROKER_LISTENER_NAME
               value: "PLAINTEXT"
+
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
               value: "1"
+
             - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
               value: "1"
+
             - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
               value: "1"
+
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "true"
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: kafka
   namespace: predictive-maintenance
+
 spec:
   selector:
     app: kafka
+
   ports:
+    # Used by services inside Kubernetes
     - name: internal
       port: 29092
       targetPort: 29092
+
+    # Optional host-facing port
     - name: external
       port: 9092
       targetPort: 9092
----
+
+  type: ClusterIP
+
+
 # ============================================================
 # INGEST SERVICE
+# Node.js / Express / Multer / KafkaJS
 # ============================================================
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -142,52 +242,80 @@ metadata:
   namespace: predictive-maintenance
   labels:
     app: ingest-service
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: ingest-service
+
   template:
     metadata:
       labels:
         app: ingest-service
+
     spec:
       containers:
         - name: ingest-service
-          image: your-docker-registry/ingest-service:latest
+
+          image: YOUR_DOCKER_REGISTRY/ingest-service:latest
           imagePullPolicy: IfNotPresent
+
           ports:
             - containerPort: 3001
+
           env:
+            # Kafka address inside Kubernetes
             - name: KAFKA_BROKER
               value: "kafka:29092"
+
             - name: PORT
               value: "3001"
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
           volumeMounts:
             - name: uploads-storage
               mountPath: /app/uploads
+
       volumes:
         - name: uploads-storage
           persistentVolumeClaim:
             claimName: uploads-pvc
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: ingest-service
   namespace: predictive-maintenance
+
 spec:
   selector:
     app: ingest-service
+
   ports:
     - name: http
       port: 3001
       targetPort: 3001
+
   type: ClusterIP
----
+
+
 # ============================================================
 # DATA PROCESSING SERVICE
+# Python / Kafka / YOLO / OpenCV
 # ============================================================
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -195,40 +323,64 @@ metadata:
   namespace: predictive-maintenance
   labels:
     app: data-processing-service
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: data-processing-service
+
   template:
     metadata:
       labels:
         app: data-processing-service
+
     spec:
       containers:
         - name: data-processing-service
-          image: your-docker-registry/data-processing-service:latest
+
+          image: YOUR_DOCKER_REGISTRY/data-processing-service:latest
           imagePullPolicy: IfNotPresent
-          # The repository currently contains processor.py rather than main.py.
-          command: ["python", "processor.py"]
+
           env:
+
+            # IMPORTANT:
+            # processor.py should read this variable.
             - name: KAFKA_BROKER
               value: "kafka:29092"
+
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+
             - name: PYTHONUNBUFFERED
               value: "1"
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+
           volumeMounts:
             - name: uploads-storage
               mountPath: /app/uploads
+
       volumes:
         - name: uploads-storage
           persistentVolumeClaim:
             claimName: uploads-pvc
----
+
+
 # ============================================================
 # PREDICTIVE MAINTENANCE SERVICE
+# FastAPI / PyTorch / Model inference
 # ============================================================
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -236,70 +388,91 @@ metadata:
   namespace: predictive-maintenance
   labels:
     app: predictive-maintenance-service
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: predictive-maintenance-service
+
   template:
     metadata:
       labels:
         app: predictive-maintenance-service
+
     spec:
       containers:
         - name: predictive-maintenance-service
-          image: your-docker-registry/predictive-maintenance-service:latest
+
+          image: YOUR_DOCKER_REGISTRY/predictive-maintenance-service:latest
           imagePullPolicy: IfNotPresent
+
           ports:
             - containerPort: 8000
+
           env:
             - name: MODEL_DIR
               value: "/app/saved_models"
+
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+
             - name: PYTHONUNBUFFERED
               value: "1"
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+
           readinessProbe:
             httpGet:
               path: /ready
               port: 8000
+
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 6
+
           livenessProbe:
             httpGet:
               path: /health
               port: 8000
+
             initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 3
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "500m"
-            limits:
-              memory: "2Gi"
-              cpu: "1000m"
-          # Do not mount an emptyDir over /app/saved_models: the predictive
-          # service Dockerfile copies the trained models into this directory.
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: predictive-maintenance-service
   namespace: predictive-maintenance
+
 spec:
   selector:
     app: predictive-maintenance-service
+
   ports:
     - name: http
       port: 8000
       targetPort: 8000
+
   type: ClusterIP
----
+
+
 # ============================================================
 # UI SERVICE
+# Streamlit
 # ============================================================
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -307,48 +480,73 @@ metadata:
   namespace: predictive-maintenance
   labels:
     app: ui-service
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: ui-service
+
   template:
     metadata:
       labels:
         app: ui-service
+
     spec:
       containers:
         - name: ui-service
-          image: your-docker-registry/ui-service:latest
+
+          image: YOUR_DOCKER_REGISTRY/ui-service:latest
           imagePullPolicy: IfNotPresent
+
           ports:
             - containerPort: 8501
+
           env:
+            # Streamlit connects to FastAPI through Kubernetes DNS
             - name: MODEL_SERVICE_HOST
               value: "predictive-maintenance-service"
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
           readinessProbe:
             httpGet:
               path: /_stcore/health
               port: 8501
+
             initialDelaySeconds: 15
             periodSeconds: 10
+
           livenessProbe:
             httpGet:
               path: /_stcore/health
               port: 8501
+
             initialDelaySeconds: 30
             periodSeconds: 20
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: ui-service
   namespace: predictive-maintenance
+
 spec:
   selector:
     app: ui-service
+
   ports:
     - name: http
       port: 8501
       targetPort: 8501
+
   type: LoadBalancer
