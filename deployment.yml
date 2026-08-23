@@ -1,31 +1,257 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: predictive-maintenance
+---
+# ============================================================
+# ZOOKEEPER
+# ============================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: predictive-maintenance-app
+  name: zookeeper
+  namespace: predictive-maintenance
   labels:
-    app: predictive-maintenance
+    app: zookeeper
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: predictive-maintenance
+      app: zookeeper
   template:
     metadata:
       labels:
-        app: predictive-maintenance
+        app: zookeeper
     spec:
       containers:
-      - name: predictive-maintenance-container
-        # Replace with your actual container registry image path and tag
-        image: your-docker-registry/predictive-maintenance:latest
+      - name: zookeeper
+        image: confluentinc/cp-zookeeper:7.6.0
+        ports:
+        - containerPort: 2181
+        env:
+        - name: ZOOKEEPER_CLIENT_PORT
+          value: "2181"
+        - name: ZOOKEEPER_TICK_TIME
+          value: "2000"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  namespace: predictive-maintenance
+spec:
+  selector:
+    app: zookeeper
+  ports:
+  - port: 2181
+    targetPort: 2181
+---
+# ============================================================
+# KAFKA
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: predictive-maintenance
+  labels:
+    app: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: confluentinc/cp-kafka:7.6.0
+        ports:
+        - containerPort: 9092
+        - containerPort: 29092
+        env:
+        - name: KAFKA_BROKER_ID
+          value: "1"
+        - name: KAFKA_ZOOKEEPER_CONNECT
+          value: "zookeeper:2181"
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+        - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+          value: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: "PLAINTEXT"
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: "1"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: predictive-maintenance
+spec:
+  selector:
+    app: kafka
+  ports:
+  - name: internal
+    port: 29092
+    targetPort: 29092
+  - name: external
+    port: 9092
+    targetPort: 9092
+---
+# ============================================================
+# INGEST SERVICE (Node.js / Express + Multer + KafkaJS)
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-service
+  namespace: predictive-maintenance
+  labels:
+    app: ingest-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingest-service
+  template:
+    metadata:
+      labels:
+        app: ingest-service
+    spec:
+      containers:
+      - name: ingest-service
+        image: your-docker-registry/ingest-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3001
+        env:
+        - name: KAFKA_BROKER
+          value: "kafka:29092"
+        - name: PORT
+          value: "3001"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: uploads-storage
+          mountPath: /app/uploads
+      volumes:
+      - name: uploads-storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest-service
+  namespace: predictive-maintenance
+spec:
+  selector:
+    app: ingest-service
+  ports:
+  - port: 3001
+    targetPort: 3001
+  type: ClusterIP
+---
+# ============================================================
+# DATA PROCESSING SERVICE (Python / Kafka Consumer + YOLO + SQLite)
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-processing-service
+  namespace: predictive-maintenance
+  labels:
+    app: data-processing-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-processing-service
+  template:
+    metadata:
+      labels:
+        app: data-processing-service
+    spec:
+      containers:
+      - name: data-processing-service
+        image: your-docker-registry/data-processing-service:latest
         imagePullPolicy: IfNotPresent
         env:
+        - name: KAFKA_BROKER
+          value: "kafka:29092"
         - name: PYTHONDONTWRITEBYTECODE
           value: "1"
         - name: PYTHONUNBUFFERED
           value: "1"
-        # Optional: Override the default CMD if running a server or worker process
-        # command: ["python", "data_ingestion.py"]
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: uploads-storage
+          mountPath: /app/uploads
+      volumes:
+      - name: uploads-storage
+        emptyDir: {}
+---
+# ============================================================
+# PREDICTIVE MAINTENANCE SERVICE (FastAPI + PyTorch Transformer)
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictive-maintenance-service
+  namespace: predictive-maintenance
+  labels:
+    app: predictive-maintenance-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predictive-maintenance-service
+  template:
+    metadata:
+      labels:
+        app: predictive-maintenance-service
+    spec:
+      containers:
+      - name: predictive-maintenance-service
+        image: your-docker-registry/predictive-maintenance-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+        env:
+        - name: MODEL_DIR
+          value: "/app/saved_models"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
         resources:
           requests:
             memory: "512Mi"
@@ -33,21 +259,84 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 15
         volumeMounts:
-        - name: app-storage
-          mountPath: /app/datasets
-        - name: ingested-storage
-          mountPath: /app/ingested_datasets
-        - name: uploads-storage
-          mountPath: /app/uploads
         - name: models-storage
-          mountPath: /app/models
+          mountPath: /app/saved_models
       volumes:
-      - name: app-storage
-        emptyDir: {}
-      - name: ingested-storage
-        emptyDir: {}
-      - name: uploads-storage
-        emptyDir: {}
       - name: models-storage
         emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: predictive-maintenance-service
+  namespace: predictive-maintenance
+spec:
+  selector:
+    app: predictive-maintenance-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+---
+# ============================================================
+# UI SERVICE (Streamlit Dashboard)
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui-service
+  namespace: predictive-maintenance
+  labels:
+    app: ui-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ui-service
+  template:
+    metadata:
+      labels:
+        app: ui-service
+    spec:
+      containers:
+      - name: ui-service
+        image: your-docker-registry/ui-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8501
+        env:
+        - name: MODEL_SERVICE_HOST
+          value: "predictive-maintenance-service"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui-service
+  namespace: predictive-maintenance
+spec:
+  selector:
+    app: ui-service
+  ports:
+  - port: 8501
+    targetPort: 8501
+  type: LoadBalancer
