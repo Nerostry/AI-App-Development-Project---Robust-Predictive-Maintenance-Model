@@ -1,5 +1,5 @@
-<img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/8949b0a1-f8e6-4daa-8343-e990d062f2f3" />
-<img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/bcb1dc09-956b-4328-b6df-0b4b32a59464" />
+
+
 # AI App Development Project: Robust Predictive Maintenance Model
 
 Welcome to the **Robust Predictive Maintenance Model** repository. This project delivers a scalable, end-to-end machine learning application that predicts maintenance needs. It features a robust data pipeline for seamless data ingestion, a trained predictive model, and a containerized microservices architecture for easy deployment.
@@ -94,9 +94,6 @@ Use this method for production-level deployment with scaling capabilities.
 *   **Model Latency:** The YOLO integration currently introduces a slight delay (~500ms) during peak load times. 
 *   **Data Upload Limits:** The Streamlit frontend currently caps batch CSV uploads at 200MB to prevent memory timeouts.
 *   *(Add any other known bugs or incomplete features here so the graders know you are aware of them)*.
-
----
-
 ## 📂 Repository Structure
 ```text
 ├── User_InterFace/                 # Streamlit frontend application
@@ -111,3 +108,9 @@ Use this method for production-level deployment with scaling capabilities.
 ├── Dockerfile                      # Application container blueprint
 ├── docker-compose.yml              # Multi-container orchestration
 └── deployment.yml                  # Kubernetes deployment configuration
+---
+## diagram
+<img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/bcb1dc09-956b-4328-b6df-0b4b32a59464" />
+
+
+
