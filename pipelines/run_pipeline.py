@@ -1,9 +1,9 @@
 import logging
-from pipelines.data_ingestion import DataIngestion
+from pipelines.data_ingest import DataIngestion
 from pipelines.data_clean import DataCleaning
 from pipelines.feature_engineering import FeatureEngineering
-from pipelines.model_training import ModelTrainer
-from pipelines.model_evaluate import ModelEvaluator
+from pipelines.model_train import ModelTrainer
+from pipelines.model_eval import ModelEvaluator
 from pipelines.model_save import ModelSaver
 
 logging.basicConfig(level=logging.INFO)

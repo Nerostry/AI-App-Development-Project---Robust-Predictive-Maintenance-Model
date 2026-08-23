@@ -2,10 +2,8 @@ import hashlib
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
-
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageOps, ImageStat
 from sklearn.impute import KNNImputer
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
@@ -16,8 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 class PredictiveMaintenancePreprocessor:
     """Handles dataset ingestion, column normalization, domain boundary cleaning,
-    sensor anomaly/outlier attenuation, missingness imputation, target engineering,
-    and visual sensor telemetry preprocessing.
+    sensor anomaly/outlier attenuation, missingness imputation, and target engineering.
     """
 
     def __init__(
@@ -32,7 +29,6 @@ class PredictiveMaintenancePreprocessor:
     def load_data(self, filename: str) -> pd.DataFrame:
         """Loads a CSV file from the ingested data directory, deduplicates, and parses dates."""
         file_path = self.data_dir / filename
-
         if not file_path.exists():
             raise FileNotFoundError(
                 f"Required dataset file not found: {file_path.resolve()}"
@@ -41,7 +37,6 @@ class PredictiveMaintenancePreprocessor:
         logging.info(f"Loading dataset from {file_path}...")
         df = pd.read_csv(file_path)
         df = df.drop_duplicates().reset_index(drop=True)
-
         if "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"])
 
@@ -52,7 +47,7 @@ class PredictiveMaintenancePreprocessor:
     def standardize_and_sanitize_maintenance_data(self) -> pd.DataFrame:
         """Standardizes column names, applies boundary validations, and trims physical limits."""
         if self.df is None:
-            raise ValueError("Data has not been loaded. Call `load_data()` first.")
+            raise ValueError("Data has not been loaded. Call load_data() first.")
 
         df = self.df.copy()
 
@@ -90,7 +85,6 @@ class PredictiveMaintenancePreprocessor:
         # 4. Filter or attenuate extreme sensor glitches
         if "vibration_level_mm_per_s" in df.columns:
             df.loc[df["vibration_level_mm_per_s"] > 15.0, "vibration_level_mm_per_s"] = np.nan
-
         if "temperature_c" in df.columns:
             df.loc[df["temperature_c"] > 150.0, "temperature_c"] = np.nan
 
@@ -105,10 +99,9 @@ class PredictiveMaintenancePreprocessor:
     ) -> pd.DataFrame:
         """Imputes realistic sensor dropout/missingness using KNN over machine context."""
         if self.df is None:
-            raise ValueError("Data has not been loaded. Call `load_data()` first.")
+            raise ValueError("Data has not been loaded. Call load_data() first.")
 
         df = self.df.copy()
-
         if sensor_cols is None:
             sensor_cols = [
                 "temperature_c",
@@ -122,18 +115,18 @@ class PredictiveMaintenancePreprocessor:
         missing_counts = df[available_sensors].isna().sum().sum()
 
         if missing_counts > 0:
-            logging.info(f"Imputing {missing_counts} missing sensor values across features...")
-
+            logging.info(
+                f"Imputing {missing_counts} missing sensor values across features..."
+            )
             cat_cols = [c for c in ["model"] if c in df.columns]
             df_for_impute = pd.get_dummies(df[available_sensors + cat_cols], drop_first=True)
 
             scaler = StandardScaler()
             scaled_data = scaler.fit_transform(df_for_impute)
-
             imputer = KNNImputer(n_neighbors=n_neighbors)
             imputed_scaled = imputer.fit_transform(scaled_data)
-
             imputed_data = scaler.inverse_transform(imputed_scaled)
+
             df[available_sensors] = imputed_data[:, : len(available_sensors)]
 
         self.df = df
@@ -146,7 +139,7 @@ class PredictiveMaintenancePreprocessor:
     ) -> pd.DataFrame:
         """Combines failure components, imputes missing failure modes, and flags failures."""
         if self.df is None:
-            raise ValueError("Data has not been loaded. Call `load_data()` first.")
+            raise ValueError("Data has not been loaded. Call load_data() first.")
 
         df = self.df.copy()
 
@@ -164,15 +157,21 @@ class PredictiveMaintenancePreprocessor:
 
         if feature_cols is None:
             feature_cols = [
-                "volt", "rotate", "pressure", "vibration",
-                "temperature_c", "vibration_level_mm_per_s",
-                "load_percentage", "operating_hours", "model", "age",
+                "volt",
+                "rotate",
+                "pressure",
+                "vibration",
+                "temperature_c",
+                "vibration_level_mm_per_s",
+                "load_percentage",
+                "operating_hours",
+                "model",
+                "age",
             ]
 
         available_features = [col for col in feature_cols if col in df.columns]
         train_mask = df["comp_failure"].notna()
         error_col = "errorid" if "errorid" in df.columns else ("errorID" if "errorID" in df.columns else None)
-
         target_mask = (
             df["comp_failure"].isna() & df[error_col].notna()
             if error_col
@@ -180,8 +179,9 @@ class PredictiveMaintenancePreprocessor:
         )
 
         if target_mask.sum() > 0 and train_mask.sum() > 0 and available_features:
-            logging.info(f"Imputing {target_mask.sum()} missing component failures via KNN...")
-
+            logging.info(
+                f"Imputing {target_mask.sum()} missing component failures via KNN..."
+            )
             X_encoded = pd.get_dummies(
                 df[available_features],
                 columns=[c for c in ["model"] if c in available_features],
@@ -205,8 +205,11 @@ class PredictiveMaintenancePreprocessor:
             )
 
             knn = KNeighborsClassifier(n_neighbors=n_neighbors)
-            knn.fit(X_scaled[train_mask], df.loc[train_mask, "comp_failure"].astype(str))
-            df.loc[target_mask, "comp_failure"] = knn.predict(X_scaled[target_mask])
+            knn.fit(
+                X_scaled.loc[train_mask],
+                df.loc[train_mask, "comp_failure"].astype(str),
+            )
+            df.loc[target_mask, "comp_failure"] = knn.predict(X_scaled.loc[target_mask])
 
         df["failed"] = df["comp_failure"].notna().astype(int)
         self.df = df
@@ -233,69 +236,6 @@ class PredictiveMaintenancePreprocessor:
 
         return self.df
 
-    def clean_ingested_images(
-        self,
-        images_dir: Optional[Union[str, Path]] = None,
-        output_dir: Optional[Union[str, Path]] = None,
-        target_size: Tuple[int, int] = (256, 256),
-        min_std_threshold: float = 1.0,
-        valid_extensions: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"),
-    ) -> Dict[str, int]:
-        """Cleans images: removes corrupt/blank images, preserves aspect ratio,
-        and standardizes resolution using high-quality resampling filters.
-        """
-        images_path = Path(images_dir) if images_dir else self.data_dir / "images"
-        out_path = Path(output_dir) if output_dir else self.output_dir / "images"
-        out_path.mkdir(parents=True, exist_ok=True)
-
-        if not images_path.exists():
-            logging.warning(f"Image directory '{images_path.resolve()}' does not exist.")
-            return {"total": 0, "kept": 0, "removed_corrupt": 0, "removed_blank": 0}
-
-        stats = {"total": 0, "kept": 0, "removed_corrupt": 0, "removed_blank": 0}
-        image_files = sorted(
-            f for f in images_path.iterdir()
-            if f.is_file() and f.suffix.lower() in valid_extensions
-        )
-
-        # Use high-quality Lanczos resampling
-        resample_filter = getattr(Image.Resampling, "LANCZOS", Image.LANCZOS)
-
-        for file_path in image_files:
-            stats["total"] += 1
-            try:
-                with Image.open(file_path) as img:
-                    img.verify()
-
-                with Image.open(file_path) as img:
-                    img_rgb = img.convert("RGB")
-                    
-                    # Check variance across channels
-                    stat = ImageStat.Stat(img_rgb)
-                    avg_std = sum(stat.stddev) / len(stat.stddev)
-                    if avg_std < min_std_threshold:
-                        stats["removed_blank"] += 1
-                        logging.info(f"[SKIP] Low-variance image: {file_path.name} (std={avg_std:.2f})")
-                        continue
-
-                    # Resize with aspect-ratio preservation (Letterbox/Pad)
-                    img_resized = ImageOps.pad(img_rgb, target_size, method=resample_filter, color=(0, 0, 0))
-
-                    dest_file = out_path / f"{file_path.stem}.png"
-                    img_resized.save(dest_file, format="PNG")
-                    stats["kept"] += 1
-
-            except (OSError, IOError, ValueError) as e:
-                stats["removed_corrupt"] += 1
-                logging.warning(f"[REMOVE] Corrupt/unreadable image '{file_path.name}': {e}")
-                continue
-
-        logging.info(
-            f"Image cleaning complete: {stats['kept']}/{stats['total']} kept | "
-            f"corrupt={stats['removed_corrupt']}, blank={stats['removed_blank']}"
-        )
-        return stats
-
     def save(self, output_filename: str) -> Path:
         """Saves the processed DataFrame to the clean_dataset output directory."""
         if self.df is None:
@@ -317,10 +257,8 @@ class PredictiveMaintenancePreprocessor:
         self.load_data(filename=input_filename)
         self.standardize_and_sanitize_maintenance_data()
         self.impute_continuous_sensor_data()
-
         if run_knn_imputation:
             self.impute_and_engineer_features()
-
         self.format_numeric_precision()
         self.save(output_filename=output_filename)
         return self.df
@@ -344,10 +282,4 @@ if __name__ == "__main__":
         input_filename="PdM_combined.csv",
         output_filename="PdM_combined_cleaned.csv",
         run_knn_imputation=True,
-    )
-
-    # 3. Clean and process thermal/camera images
-    image_stats = processor.clean_ingested_images(
-        images_dir="datasets/ingested_dataset/images",
-        output_dir="datasets/clean_dataset/images",
     )

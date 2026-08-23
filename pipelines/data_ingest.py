@@ -3,14 +3,12 @@ import shutil
 import zipfile
 from pathlib import Path
 from typing import Dict, Optional, Union
-
 import pandas as pd
 
 
 class DataIngestor:
-    """Handles dataset discovery, multi-format file loading, ZIP archive extraction
-
-    for tabular datasets, and extraction of image assets into ingested storage.
+    """Handles dataset discovery, multi-format file loading, and ZIP
+    archive extraction for tabular datasets into ingested storage.
     """
 
     SUPPORTED_LOADERS = {
@@ -25,8 +23,7 @@ class DataIngestor:
         ".pkl": lambda p: pd.read_pickle(p),
     }
 
-    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp"}
-    IGNORE_FILENAMES = {"readme", "license", "notes", "description"}
+    IGNORE_FILENAMES = ("readme", "license", "notes", "description")
 
     def __init__(
         self,
@@ -37,7 +34,6 @@ class DataIngestor:
         self.datasets_path = Path(datasets_dir)
         self.output_path = Path(output_dir)
         self.extract_path = Path(extract_dir)
-        self.images_output_path = self.output_path / "images"
 
     def _is_readme_or_metadata(self, file_path: Union[str, Path]) -> bool:
         """Checks if a file is a readme, documentation, or metadata text file."""
@@ -74,19 +70,14 @@ class DataIngestor:
             return {}
 
         if zipfile.is_zipfile(file_path):
-            return self._handle_zip(file_path)
-
-        if file_path.suffix.lower() in self.IMAGE_EXTENSIONS:
-            self._handle_single_image(file_path)
-            return {}
+            return self.handle_zip(file_path)
 
         df = self._load_single_file(file_path)
         return {file_path.stem: df} if df is not None else {}
 
-    def _handle_zip(self, zip_path: Path) -> Dict[str, pd.DataFrame]:
+    def handle_zip(self, zip_path: Path) -> Dict[str, pd.DataFrame]:
         """Extracts ZIP contents using extended paths on Windows to bypass MAX_PATH limits,
-
-        persisting image files and loading tabular data.
+        and loads tabular data.
         """
         print(f"[INFO] '{zip_path.name}' is a zip file. Extracting...")
         target_dir = self.extract_path / zip_path.stem
@@ -97,14 +88,7 @@ class DataIngestor:
         if os.name == "nt" and not extract_target_str.startswith("\\\\?\\"):
             extract_target_str = "\\\\?\\" + extract_target_str
 
-        # Prepare the image destination root with \\?\ support
-        self.images_output_path.mkdir(parents=True, exist_ok=True)
-        images_dest_str = str(self.images_output_path.resolve())
-        if os.name == "nt" and not images_dest_str.startswith("\\\\?\\"):
-            images_dest_str = "\\\\?\\" + images_dest_str
-
         dataframes: Dict[str, pd.DataFrame] = {}
-        image_count = 0
 
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
@@ -116,40 +100,23 @@ class DataIngestor:
                     full_path = Path(root) / fname
                     ext = full_path.suffix.lower()
 
-                    # Skip README or documentation text files inside the archive
+                    # Skip README or documentation text files inside archive
                     if self._is_readme_or_metadata(full_path):
                         print(f"[SKIP] Non-tabular metadata/readme inside archive: {fname}")
                         continue
 
-                    # Handle image files within archives
-                    if ext in self.IMAGE_EXTENSIONS:
-                        dest_file_str = os.path.join(images_dest_str, fname)
-                        shutil.copy2(str(full_path), dest_file_str)
-                        image_count += 1
-
                     # Handle tabular files within archives
-                    elif ext in self.SUPPORTED_LOADERS:
+                    if ext in self.SUPPORTED_LOADERS:
                         try:
                             df = self._load_single_file(full_path)
                             if df is not None:
                                 dataframes[full_path.stem] = df
                         except Exception as e:
                             print(f"[WARN] Skipped tabular '{fname}': {e}")
-
-            if image_count > 0:
-                print(f"[INFO] Extracted {image_count} images to '{self.images_output_path}'")
-
         finally:
             shutil.rmtree(extract_target_str, ignore_errors=True)
 
         return dataframes
-
-    def _handle_single_image(self, file_path: Path) -> None:
-        """Copies individual image files to the ingested images folder."""
-        self.images_output_path.mkdir(parents=True, exist_ok=True)
-        dest_file = self.images_output_path / file_path.name
-        shutil.copy2(file_path, dest_file)
-        print(f"[INFO] Saved image: {dest_file.name}")
 
     def _load_single_file(self, file_path: Path) -> Optional[pd.DataFrame]:
         """Loads supported tabular files into a pandas DataFrame."""
@@ -174,14 +141,17 @@ class DataIngestor:
         print(f"\n[INFO] Saving ingested datasets to '{self.output_path.resolve()}'...")
         for key, df in dataframes.items():
             # Skip saving individual PdM component tables to disk
-            normalized = key.lower()
-            if any(pdm_part in normalized for pdm_part in ["telemetry", "machines", "failures", "errors", "maint", "pdm_"]):
+            normalized_key = key.lower()
+            if any(
+                pdm_part in normalized_key
+                for pdm_part in ["telemetry", "machines", "failures", "errors", "maint", "pdm"]
+            ):
                 continue
 
             clean_name = f"{key}_ingested.csv"
             save_file = self.output_path / clean_name
             df.to_csv(save_file, index=False)
-            print(f"  Saved: {save_file.name} | Shape: {df.shape}")
+            print(f"Saved: {save_file.name} (Shape: {df.shape})")
 
 
 class DatasetCombiner:
@@ -211,7 +181,7 @@ class DatasetCombiner:
             key.lower()
             .replace("_ingested", "")
             .replace("pdm_", "")
-            .replace("microsoft_azure_pmd_raw_v1_", "")
+            .replace("microsoft_azure_pmd_raw_v1", "")
             .strip()
         )
 
@@ -225,11 +195,11 @@ class DatasetCombiner:
     def combine(self) -> Optional[pd.DataFrame]:
         """Merges telemetry, machine properties, failures, errors, and maintenance records."""
         normalized_dfs = {self._normalize_name(k): v for k, v in self.dfs.items()}
-
         required_tables = ["telemetry", "machines"]
+
         for tbl in required_tables:
             if tbl not in normalized_dfs:
-                print(f"[WARN] Missing '{tbl}' table. Skipping merge step.")
+                print(f"[WARN] Missing {tbl} table. Skipping merge step.")
                 return None
 
         self.dfs = normalized_dfs
@@ -248,7 +218,6 @@ class DatasetCombiner:
             if table_name in self.dfs:
                 event_df = self.dfs[table_name]
                 event_df = event_df.drop_duplicates(subset=["datetime", "machineID"])
-
                 df_combined = pd.merge(
                     df_combined,
                     event_df,
@@ -265,6 +234,7 @@ if __name__ == "__main__":
     ingestor = DataIngestor(
         datasets_dir="datasets/raw_datasets",
         output_dir="datasets/ingested_dataset",
+        extract_dir="datasets/extracted_temp",
     )
     ingested_data = ingestor.run()
 

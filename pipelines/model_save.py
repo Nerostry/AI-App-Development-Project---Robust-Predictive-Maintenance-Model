@@ -8,6 +8,6 @@ os.makedirs(output_dir, exist_ok=True)
 # Define saved model path
 model_path = os.path.join(output_dir, "predictive_maintenance_model.pth")
 
-# Save model state_dict (recommended)
+# Save model state_dict
 torch.save(model.state_dict(), model_path)
 print(f"PyTorch model state saved successfully to {model_path}")
