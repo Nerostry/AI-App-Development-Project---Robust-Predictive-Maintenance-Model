@@ -28,7 +28,6 @@ device = torch.device(
 
 USE_AMP = device.type == "cuda"
 
-# PyTorch 2.x
 USE_COMPILE = (
     device.type == "cuda"
     and hasattr(torch, "compile")
@@ -68,23 +67,28 @@ MODEL_SAVE_PATH = (
 
 SEQUENCE_LENGTH = 32
 
-# 16 = 50% overlap
-# 32 = no overlap
+# 16 = 50% overlap while avoiding the much larger number of
+# near-duplicate windows produced by a step of 1 or 4.
 WINDOW_STEP = 16
 
 BATCH_SIZE = 256
-EPOCHS = 15
+EPOCHS = 30
 
-LEARNING_RATE = 1e-3
-
-NUM_WORKERS = min(
-    4,
-    os.cpu_count() or 1
-)
+LEARNING_RATE = 3e-4
 
 WEIGHT_DECAY = 1e-4
 
-EARLY_STOPPING_PATIENCE = 3
+EARLY_STOPPING_PATIENCE = 5
+
+VALIDATION_FRACTION = 0.15
+
+# Focal loss replaces the previous aggressive BCE neg/pos weighting.
+# A lower alpha prevents the positive class from being over-emphasised,
+# which is appropriate for the observed false-positive-heavy baseline.
+FOCAL_ALPHA = 0.25
+FOCAL_GAMMA = 2.0
+
+GRADIENT_CLIP_NORM = 1.0
 
 
 # ============================================================
@@ -138,7 +142,8 @@ def resolve_label_column(df):
 
             return (
                 df[col]
-                .astype(np.int8)
+                .astype(np.int8),
+                col,
             )
 
     comp_failure_cols = [
@@ -158,7 +163,8 @@ def resolve_label_column(df):
             df[comp_failure_cols]
             .sum(axis=1)
             .gt(0)
-            .astype(np.int8)
+            .astype(np.int8),
+            None,
         )
 
     raise ValueError(
@@ -196,6 +202,11 @@ def resolve_feature_columns(
         )
     ]
 
+    if not feature_cols:
+        raise ValueError(
+            "No numeric feature columns found."
+        )
+
     print(
         f"Using {len(feature_cols)} features"
     )
@@ -217,6 +228,15 @@ class MaintenanceSequenceDataset(Dataset):
 
     This avoids making a huge duplicated array
     when windows overlap.
+
+    The label is taken from the END of each sequence.
+    This makes the training objective:
+
+        past 32 hours of telemetry
+            -> imminent/current end-of-window failure label
+
+    rather than marking a sequence positive merely because
+    a failure occurred somewhere earlier inside the window.
     """
 
     def __init__(
@@ -232,7 +252,6 @@ class MaintenanceSequenceDataset(Dataset):
         self.sequence_length = sequence_length
         self.step = step
 
-        # Keep data contiguous for faster slicing.
         self.features = np.ascontiguousarray(
             df[feature_cols]
             .to_numpy(dtype=np.float32)
@@ -243,10 +262,6 @@ class MaintenanceSequenceDataset(Dataset):
         )
 
         self.indices = []
-
-        # ----------------------------------------------------
-        # Build only window indices
-        # ----------------------------------------------------
 
         if (
             machine_id_col is not None
@@ -267,9 +282,7 @@ class MaintenanceSequenceDataset(Dataset):
                     dtype=np.int64
                 )
 
-                self._add_windows(
-                    idx
-                )
+                self._add_windows(idx)
 
         else:
 
@@ -296,10 +309,9 @@ class MaintenanceSequenceDataset(Dataset):
             dtype=np.int64
         )
 
-        # ----------------------------------------------------
-        # Pre-compute labels
-        # ----------------------------------------------------
-
+        # IMPORTANT:
+        # Use the label at the final timestep rather than
+        # max(label over the whole sequence).
         self.seq_labels = (
             self.labels[
                 self.indices[:, 1] - 1
@@ -359,7 +371,6 @@ class MaintenanceSequenceDataset(Dataset):
         if n < self.sequence_length:
             return
 
-        # Number of valid windows.
         max_start = (
             n - self.sequence_length + 1
         )
@@ -422,9 +433,9 @@ class TabularSequenceTransformer(
     def __init__(
         self,
         num_features,
-        embed_dim=64,
+        embed_dim=96,
         nhead=4,
-        num_layers=2,
+        num_layers=3,
     ):
 
         super().__init__()
@@ -434,17 +445,33 @@ class TabularSequenceTransformer(
                 num_features,
                 embed_dim
             ),
-            nn.ReLU(),
+            nn.GELU(),
             nn.LayerNorm(embed_dim),
+        )
+
+        # Learnable temporal embeddings make timestep position explicit.
+        self.position_embedding = nn.Parameter(
+            torch.zeros(
+                1,
+                SEQUENCE_LENGTH,
+                embed_dim
+            )
+        )
+
+        nn.init.trunc_normal_(
+            self.position_embedding,
+            std=0.02
         )
 
         encoder_layer = (
             nn.TransformerEncoderLayer(
                 d_model=embed_dim,
                 nhead=nhead,
-                dim_feedforward=embed_dim * 2,
+                dim_feedforward=embed_dim * 4,
                 batch_first=True,
-                dropout=0.1,
+                dropout=0.15,
+                activation="gelu",
+                norm_first=True,
             )
         )
 
@@ -455,18 +482,36 @@ class TabularSequenceTransformer(
             )
         )
 
-        self.classifier_head = nn.Sequential(
+        self.norm = nn.LayerNorm(
+            embed_dim
+        )
+
+        # Learned attention pooling replaces mean pooling so the model can
+        # focus on the timestamps most relevant to an imminent failure.
+        self.attention_pool = nn.Sequential(
             nn.Linear(
                 embed_dim,
                 32
             ),
-
-            nn.ReLU(),
-
-            nn.Dropout(0.2),
-
+            nn.Tanh(),
             nn.Linear(
                 32,
+                1
+            ),
+        )
+
+        self.classifier_head = nn.Sequential(
+            nn.Linear(
+                embed_dim,
+                64
+            ),
+
+            nn.GELU(),
+
+            nn.Dropout(0.30),
+
+            nn.Linear(
+                64,
                 1
             ),
         )
@@ -475,55 +520,244 @@ class TabularSequenceTransformer(
 
         x = self.input_projection(x)
 
+        x = (
+            x
+            + self.position_embedding[
+                :, :x.size(1)
+            ]
+        )
+
         x = self.transformer(x)
 
-        x = x.mean(dim=1)
+        x = self.norm(x)
+
+        attention_scores = (
+            self.attention_pool(x)
+            .squeeze(-1)
+        )
+
+        attention_weights = torch.softmax(
+            attention_scores,
+            dim=1
+        )
+
+        pooled = torch.sum(
+            x
+            * attention_weights.unsqueeze(-1),
+            dim=1
+        )
 
         return (
-            self.classifier_head(x)
+            self.classifier_head(pooled)
             .squeeze(-1)
         )
 
 
 # ============================================================
-# 7. Class Weight
+# 7. Focal Loss
 # ============================================================
 
-def calculate_pos_weight(
-    labels
-):
+class BinaryFocalLoss(nn.Module):
 
-    positive = float(
-        labels.sum()
-    )
+    """
+    Binary focal loss.
 
-    negative = float(
-        len(labels) - positive
-    )
+    Unlike BCEWithLogitsLoss(pos_weight=negative/positive), this does not
+    apply the extremely large class weight that previously drove recall to
+    1.0 while precision collapsed to 0.147.
 
-    if positive == 0:
+    alpha=0.25 deliberately avoids over-weighting positive predictions.
+    gamma=2.0 down-weights easy examples and concentrates learning on
+    difficult examples, including hard negatives.
+    """
 
-        raise ValueError(
-            "No positive training samples."
+    def __init__(
+        self,
+        alpha=0.25,
+        gamma=2.0
+    ):
+
+        super().__init__()
+
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(
+        self,
+        logits,
+        targets
+    ):
+
+        bce = (
+            nn.functional
+            .binary_cross_entropy_with_logits(
+                logits,
+                targets,
+                reduction="none"
+            )
         )
 
-    weight = (
-        negative / positive
+        probabilities = torch.sigmoid(
+            logits
+        )
+
+        p_t = (
+            probabilities * targets
+            + (1.0 - probabilities)
+            * (1.0 - targets)
+        )
+
+        alpha_t = (
+            self.alpha * targets
+            + (1.0 - self.alpha)
+            * (1.0 - targets)
+        )
+
+        focal_weight = (
+            alpha_t
+            * (1.0 - p_t).pow(
+                self.gamma
+            )
+        )
+
+        return (
+            focal_weight * bce
+        ).mean()
+
+
+# ============================================================
+# 8. Validation Split
+# ============================================================
+
+def chronological_split(
+    dataset,
+    validation_fraction=0.15
+):
+
+    """
+    Hold out the final portion of the generated training windows.
+
+    The dataset builds windows machine-by-machine in source order, so this
+    split preserves ordering rather than randomly distributing overlapping
+    windows between train and validation.
+
+    The validation set is used for model selection only. It is NOT used for
+    final test threshold selection.
+    """
+
+    n = len(dataset)
+
+    if n < 2:
+        raise ValueError(
+            "Need at least two sequences for validation."
+        )
+
+    split = int(
+        n * (1.0 - validation_fraction)
+    )
+
+    split = min(
+        max(split, 1),
+        n - 1
+    )
+
+    train_indices = np.arange(
+        0,
+        split,
+        dtype=np.int64
+    )
+
+    validation_indices = np.arange(
+        split,
+        n,
+        dtype=np.int64
+    )
+
+    return (
+        torch.utils.data.Subset(
+            dataset,
+            train_indices
+        ),
+        torch.utils.data.Subset(
+            dataset,
+            validation_indices
+        )
+    )
+
+
+# ============================================================
+# 9. Save
+# ============================================================
+
+def save_trained_model(
+    model,
+    path
+):
+
+    # torch.compile wraps the original module. Save the unwrapped model so
+    # model_eval.py can instantiate the same architecture and load the state.
+    if hasattr(
+        model,
+        "_orig_mod"
+    ):
+
+        model_to_save = (
+            model._orig_mod
+        )
+
+    else:
+
+        model_to_save = model
+
+    torch.save(
+        model_to_save.state_dict(),
+        path
     )
 
     print(
-        f"pos_weight = {weight:.4f}"
-    )
-
-    return torch.tensor(
-        weight,
-        dtype=torch.float32,
-        device=device
+        f"Saved model: {path}"
     )
 
 
 # ============================================================
-# 8. Training
+# 10. DataLoader helper
+# ============================================================
+
+def make_dataloader(
+    dataset,
+    shuffle
+):
+
+    num_workers = min(
+        4,
+        os.cpu_count() or 1
+    )
+
+    loader_kwargs = {
+        "batch_size": BATCH_SIZE,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": device.type == "cuda",
+    }
+
+    if num_workers > 0:
+
+        loader_kwargs[
+            "persistent_workers"
+        ] = True
+
+        loader_kwargs[
+            "prefetch_factor"
+        ] = 2
+
+    return DataLoader(
+        dataset,
+        **loader_kwargs
+    )
+
+
+# ============================================================
+# 11. Training
 # ============================================================
 
 def train_model():
@@ -536,23 +770,24 @@ def train_model():
         TRAIN_DATASET_PATH
     )
 
-    labels = resolve_label_column(
-        df
+    labels, label_col = (
+        resolve_label_column(df)
     )
 
-    label_derived_cols = (
-        [
-            "target_failure_window",
-            "failed",
-        ]
-        + [
-            c
-            for c in df.columns
-            if c.startswith(
-                "comp_failure"
-            )
-        ]
-    )
+    label_derived_cols = [
+        "target_failure_window",
+        "failed",
+        "label",
+        "target",
+        "class",
+        "is_failed",
+    ] + [
+        c
+        for c in df.columns
+        if c.startswith(
+            "comp_failure"
+        )
+    ]
 
     feature_cols = (
         resolve_feature_columns(
@@ -585,29 +820,38 @@ def train_model():
     )
 
     # --------------------------------------------------------
-    # DataLoader
+    # Chronological validation split
     # --------------------------------------------------------
 
-    loader_kwargs = {
-        "batch_size": BATCH_SIZE,
-        "shuffle": True,
-        "num_workers": NUM_WORKERS,
-        "pin_memory": device.type == "cuda",
-    }
+    train_dataset, validation_dataset = (
+        chronological_split(
+            dataset,
+            VALIDATION_FRACTION
+        )
+    )
 
-    if NUM_WORKERS > 0:
+    print(
+        f"Training windows : "
+        f"{len(train_dataset):,}"
+    )
 
-        loader_kwargs[
-            "persistent_workers"
-        ] = True
+    print(
+        f"Validation windows: "
+        f"{len(validation_dataset):,}"
+    )
 
-        loader_kwargs[
-            "prefetch_factor"
-        ] = 2
+    # --------------------------------------------------------
+    # DataLoaders
+    # --------------------------------------------------------
 
-    dataloader = DataLoader(
-        dataset,
-        **loader_kwargs
+    train_loader = make_dataloader(
+        train_dataset,
+        shuffle=True
+    )
+
+    validation_loader = make_dataloader(
+        validation_dataset,
+        shuffle=False
     )
 
     # --------------------------------------------------------
@@ -651,17 +895,10 @@ def train_model():
     # Loss
     # --------------------------------------------------------
 
-    pos_weight = (
-        calculate_pos_weight(
-            dataset.seq_labels
-        )
-    )
-
-    criterion = (
-        nn.BCEWithLogitsLoss(
-            pos_weight=pos_weight
-        )
-    )
+    criterion = BinaryFocalLoss(
+        alpha=FOCAL_ALPHA,
+        gamma=FOCAL_GAMMA
+    ).to(device)
 
     # --------------------------------------------------------
     # Optimizer
@@ -671,6 +908,16 @@ def train_model():
         model.parameters(),
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
+    )
+
+    scheduler = (
+        torch.optim.lr_scheduler
+        .ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+        )
     )
 
     # --------------------------------------------------------
@@ -686,7 +933,10 @@ def train_model():
     # Training
     # --------------------------------------------------------
 
-    best_loss = float("inf")
+    best_validation_loss = float(
+        "inf"
+    )
+
     epochs_without_improvement = 0
 
     print(
@@ -698,7 +948,8 @@ def train_model():
     )
 
     print(
-        f"Workers: {NUM_WORKERS}"
+        f"Workers: "
+        f"{min(4, os.cpu_count() or 1)}"
     )
 
     print(
@@ -707,12 +958,16 @@ def train_model():
 
     for epoch in range(EPOCHS):
 
+        # ====================================================
+        # Training phase
+        # ====================================================
+
         model.train()
 
-        running_loss = 0.0
+        running_train_loss = 0.0
 
         progress = tqdm(
-            dataloader,
+            train_loader,
             desc=(
                 f"Epoch "
                 f"{epoch + 1}/{EPOCHS}"
@@ -735,10 +990,6 @@ def train_model():
                 set_to_none=True
             )
 
-            # ------------------------------------------------
-            # Mixed precision
-            # ------------------------------------------------
-
             with torch.autocast(
                 device_type="cuda",
                 dtype=torch.float16,
@@ -754,13 +1005,20 @@ def train_model():
                     targets
                 )
 
-            # ------------------------------------------------
-            # Backprop
-            # ------------------------------------------------
-
             scaler.scale(
                 loss
             ).backward()
+
+            # Unscale before gradient clipping so the clip threshold is in
+            # the same units as the actual gradients.
+            scaler.unscale_(
+                optimizer
+            )
+
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                GRADIENT_CLIP_NORM
+            )
 
             scaler.step(
                 optimizer
@@ -768,7 +1026,7 @@ def train_model():
 
             scaler.update()
 
-            running_loss += (
+            running_train_loss += (
                 loss.item()
             )
 
@@ -776,26 +1034,93 @@ def train_model():
                 loss=f"{loss.item():.4f}"
             )
 
-        epoch_loss = (
-            running_loss
+        train_loss = (
+            running_train_loss
             / max(
-                len(dataloader),
+                len(train_loader),
                 1
             )
         )
 
-        print(
-            f"Epoch {epoch + 1}: "
-            f"loss={epoch_loss:.4f}"
+        # ====================================================
+        # Validation phase
+        # ====================================================
+
+        model.eval()
+
+        running_validation_loss = 0.0
+
+        with torch.no_grad():
+
+            for features, targets in (
+                validation_loader
+            ):
+
+                features = features.to(
+                    device,
+                    non_blocking=True
+                )
+
+                targets = targets.to(
+                    device,
+                    non_blocking=True
+                )
+
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=torch.float16,
+                    enabled=USE_AMP
+                ):
+
+                    logits = model(
+                        features
+                    )
+
+                    validation_loss = (
+                        criterion(
+                            logits,
+                            targets
+                        )
+                    )
+
+                running_validation_loss += (
+                    validation_loss.item()
+                )
+
+        validation_loss = (
+            running_validation_loss
+            / max(
+                len(validation_loader),
+                1
+            )
         )
 
-        # ----------------------------------------------------
-        # Early stopping
-        # ----------------------------------------------------
+        scheduler.step(
+            validation_loss
+        )
 
-        if epoch_loss < best_loss:
+        current_lr = (
+            optimizer.param_groups[0]["lr"]
+        )
 
-            best_loss = epoch_loss
+        print(
+            f"Epoch {epoch + 1}: "
+            f"train_loss={train_loss:.4f} "
+            f"val_loss={validation_loss:.4f} "
+            f"lr={current_lr:.2e}"
+        )
+
+        # ====================================================
+        # Model selection / early stopping
+        # ====================================================
+
+        if validation_loss < (
+            best_validation_loss - 1e-5
+        ):
+
+            best_validation_loss = (
+                validation_loss
+            )
 
             epochs_without_improvement = 0
 
@@ -820,7 +1145,7 @@ def train_model():
                 break
 
     # --------------------------------------------------------
-    # Save metadata
+    # Save feature metadata
     # --------------------------------------------------------
 
     feature_cols_path = (
@@ -832,6 +1157,10 @@ def train_model():
         feature_cols,
         feature_cols_path
     )
+
+    # --------------------------------------------------------
+    # Save architecture/training metadata
+    # --------------------------------------------------------
 
     training_config = {
         "sequence_length":
@@ -846,10 +1175,38 @@ def train_model():
         "feature_columns":
             feature_cols,
 
-        "pos_weight":
-            float(
-                pos_weight.item()
-            ),
+        "model_embed_dim":
+            96,
+
+        "model_nhead":
+            4,
+
+        "model_num_layers":
+            3,
+
+        "loss":
+            "binary_focal",
+
+        "focal_alpha":
+            FOCAL_ALPHA,
+
+        "focal_gamma":
+            FOCAL_GAMMA,
+
+        "learning_rate":
+            LEARNING_RATE,
+
+        "weight_decay":
+            WEIGHT_DECAY,
+
+        "validation_fraction":
+            VALIDATION_FRACTION,
+
+        "early_stopping_patience":
+            EARLY_STOPPING_PATIENCE,
+
+        "gradient_clip_norm":
+            GRADIENT_CLIP_NORM,
     }
 
     config_path = (
@@ -870,42 +1227,7 @@ def train_model():
 
 
 # ============================================================
-# 9. Save
-# ============================================================
-
-def save_trained_model(
-    model,
-    path
-):
-
-    # torch.compile can wrap the original model.
-    # state_dict still works, but unwrap when possible.
-
-    if hasattr(
-        model,
-        "_orig_mod"
-    ):
-
-        model_to_save = (
-            model._orig_mod
-        )
-
-    else:
-
-        model_to_save = model
-
-    torch.save(
-        model_to_save.state_dict(),
-        path
-    )
-
-    print(
-        f"Saved model: {path}"
-    )
-
-
-# ============================================================
-# 10. Main
+# 12. Main
 # ============================================================
 
 if __name__ == "__main__":
