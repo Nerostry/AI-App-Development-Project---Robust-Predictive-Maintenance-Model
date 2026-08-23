@@ -1,11 +1,26 @@
+import io
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
 from typing import Dict, Optional, Union
 import pandas as pd
 
+# ---------------------------------------------------------------------------
+# Global Constants & Defaults
+# ---------------------------------------------------------------------------
+RAW_DIR = Path("datasets/raw_datasets")
+OUTPUT_DIR = Path("datasets/ingested_dataset")
+OUTPUT_FILE = OUTPUT_DIR / "PdM_combined.csv"
 
+# Known table components in the Azure PdM dataset
+TABLE_KEYS = ["telemetry", "machines", "failures", "errors", "maint"]
+
+
+# ---------------------------------------------------------------------------
+# Class: DataIngestor
+# ---------------------------------------------------------------------------
 class DataIngestor:
     """Handles dataset discovery, multi-format file loading, and ZIP
     archive extraction for tabular datasets into ingested storage.
@@ -94,18 +109,15 @@ class DataIngestor:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(extract_target_str)
 
-            # Walk the extended extraction target path
             for root, _, files in os.walk(extract_target_str):
                 for fname in files:
                     full_path = Path(root) / fname
                     ext = full_path.suffix.lower()
 
-                    # Skip README or documentation text files inside archive
                     if self._is_readme_or_metadata(full_path):
                         print(f"[SKIP] Non-tabular metadata/readme inside archive: {fname}")
                         continue
 
-                    # Handle tabular files within archives
                     if ext in self.SUPPORTED_LOADERS:
                         try:
                             df = self._load_single_file(full_path)
@@ -140,7 +152,6 @@ class DataIngestor:
 
         print(f"\n[INFO] Saving ingested datasets to '{self.output_path.resolve()}'...")
         for key, df in dataframes.items():
-            # Skip saving individual PdM component tables to disk
             normalized_key = key.lower()
             if any(
                 pdm_part in normalized_key
@@ -154,6 +165,9 @@ class DataIngestor:
             print(f"Saved: {save_file.name} (Shape: {df.shape})")
 
 
+# ---------------------------------------------------------------------------
+# Class: DatasetCombiner
+# ---------------------------------------------------------------------------
 class DatasetCombiner:
     """Consolidates PdM tabular datasets across telemetry, metadata, and event tables."""
 
@@ -229,21 +243,95 @@ class DatasetCombiner:
         return df_combined
 
 
-if __name__ == "__main__":
-    # 1. Ingest all raw archives
-    ingestor = DataIngestor(
-        datasets_dir="datasets/raw_datasets",
-        output_dir="datasets/ingested_dataset",
-        extract_dir="datasets/extracted_temp",
+# ---------------------------------------------------------------------------
+# Direct In-Memory ZIP Functions
+# ---------------------------------------------------------------------------
+def normalize_name(filename: str) -> str:
+    """Extract standard component name (e.g., 'telemetry') from file paths."""
+    stem = Path(filename).stem.lower()
+    for key in TABLE_KEYS:
+        if re.search(rf"\b{key}\b", stem) or key in stem:
+            return key
+    return stem
+
+
+def load_azure_zip(zip_path: Path) -> Dict[str, pd.DataFrame]:
+    """Reads CSV tables directly from the Microsoft Azure ZIP archive into memory."""
+    dataframes: Dict[str, pd.DataFrame] = {}
+
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        for file_info in archive.infolist():
+            fname = file_info.filename
+            if fname.endswith("/") or not fname.lower().endswith(".csv"):
+                continue
+
+            table_key = normalize_name(fname)
+            if table_key in TABLE_KEYS:
+                with archive.open(file_info) as f:
+                    df = pd.read_csv(io.BytesIO(f.read()))
+                    dataframes[table_key] = df
+                    print(f"[LOADED] '{fname}' as '{table_key}' (Shape: {df.shape})")
+
+    return dataframes
+
+
+def merge_pdm_tables(dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Merges machine properties and event time-series onto the telemetry base table."""
+    if "telemetry" not in dfs or "machines" not in dfs:
+        missing = [k for k in ["telemetry", "machines"] if k not in dfs]
+        raise ValueError(f"Missing required tables for merge: {missing}")
+
+    for key in ["telemetry", "failures", "errors", "maint"]:
+        if key in dfs and "datetime" in dfs[key].columns:
+            dfs[key]["datetime"] = pd.to_datetime(dfs[key]["datetime"])
+
+    combined = pd.merge(
+        dfs["telemetry"],
+        dfs["machines"],
+        on="machineID",
+        how="left",
     )
-    ingested_data = ingestor.run()
 
-    # 2. Combine tabular data if available
-    combiner = DatasetCombiner(data_sources=ingested_data)
-    combined_df = combiner.combine()
+    for event_key in ["failures", "errors", "maint"]:
+        if event_key in dfs:
+            event_df = dfs[event_key].drop_duplicates(subset=["datetime", "machineID"])
+            combined = pd.merge(
+                combined,
+                event_df,
+                on=["datetime", "machineID"],
+                how="left",
+            )
 
-    # 3. Save final merged CSV
-    if combined_df is not None:
-        output_merged_path = Path("datasets/ingested_dataset/PdM_combined.csv")
-        combined_df.to_csv(output_merged_path, index=False)
-        print(f"Saved merged dataset to '{output_merged_path.resolve()}'")
+    return combined
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Execution
+# ---------------------------------------------------------------------------
+def main():
+    # 1. Locate Microsoft Azure dataset zip file
+    azure_zips = list(RAW_DIR.glob("*Azure*.[zZ][iI][pP]")) + list(
+        RAW_DIR.glob("*PMD*.[zZ][iI][pP]")
+    )
+
+    if not azure_zips:
+        raise FileNotFoundError(f"No Microsoft Azure ZIP found inside '{RAW_DIR}'.")
+
+    target_zip = azure_zips[0]
+    print(f"[PROCESSING] Ingesting archive: {target_zip.name}")
+
+    # 2. Extract and load tabular components directly into memory
+    dfs = load_azure_zip(target_zip)
+
+    # 3. Merge components into unified time-series dataset
+    merged_df = merge_pdm_tables(dfs)
+
+    # 4. Save only the final combined dataset
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    merged_df.to_csv(OUTPUT_FILE, index=False)
+    print(f"\n[SUCCESS] Final merged dataset saved to: {OUTPUT_FILE}")
+    print(f"Shape: {merged_df.shape}")
+
+
+if __name__ == "__main__":
+    main()
