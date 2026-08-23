@@ -1,18 +1,29 @@
-FROM node:20-alpine
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy dependency definitions
-COPY package*.json ./
+# System dependencies (kept minimal; add build-essential only if a wheel needs compiling)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-RUN npm install
+# Install Python dependencies first for better layer caching
+COPY predictive_maintenance_service/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all source files into container
-COPY . .
+# Copy the shared pipelines package (app.py imports pipelines.model_train)
+COPY pipelines/ ./pipelines/
 
-# Expose app port
-EXPOSE 3000
+# Copy the service source code
+COPY predictive_maintenance_service/src/ ./src/
 
-# Start command
-CMD ["npm", "start"]
+# Copy trained model weights (created by pipelines/model_train.py)
+COPY saved_models/ ./saved_models/
+
+ENV MODEL_DIR=/app/saved_models
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]

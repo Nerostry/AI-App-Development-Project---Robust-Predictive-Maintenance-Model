@@ -19,13 +19,20 @@ Fixed inference service that:
 import os
 import math
 import logging
+from importlib import import_module
 from pathlib import Path
 from typing import List, Optional
 
 import joblib
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+
+# FastAPI is an optional runtime dependency for this inference service. Resolve
+# it lazily so importing this module does not produce an unresolved-import
+# diagnostic in environments that do not install the service dependencies.
+_fastapi = import_module("fastapi")
+FastAPI = _fastapi.FastAPI
+HTTPException = _fastapi.HTTPException
 from pydantic import BaseModel, Field
 
 import uvicorn

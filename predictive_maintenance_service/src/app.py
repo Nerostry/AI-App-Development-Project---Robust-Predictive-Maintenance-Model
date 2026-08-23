@@ -3,12 +3,12 @@ import math
 import logging
 from typing import List
 
-import numpy as np
+import joblib
 import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from pipelines.model_train import StreamingMultimodalTransformer
+from pipelines.model_train import TabularSequenceTransformer, SEQUENCE_LENGTH
 
 # ==========================================
 # Configuration
@@ -18,11 +18,8 @@ logger = logging.getLogger("predictive_maintenance_service")
 
 MODEL_DIR = os.getenv("MODEL_DIR", "saved_models")
 MODEL_PATH = os.path.join(MODEL_DIR, "predictive_maintenance_model.pth")
-
-SEQUENCE_LENGTH = 64
-TS_FEATURES = 4
-NUM_FEATURES = 5
-IMG_SIZE = (3, 64, 64)
+FEATURE_COLS_PATH = os.path.join(MODEL_DIR, "feature_columns.pkl")
+THRESHOLD_PATH = os.path.join(MODEL_DIR, "decision_threshold.pkl")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -31,13 +28,26 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ==========================================
 app = FastAPI(title="Predictive Maintenance Inference Service")
 
-model: StreamingMultimodalTransformer | None = None
+model: TabularSequenceTransformer | None = None
+feature_cols: list | None = None
+decision_threshold: float = 0.5
 
 
 @app.on_event("startup")
 def load_model():
-    """Loads the trained model weights from the saved_models directory on startup."""
-    global model
+    """Loads the trained model weights, feature column order, and tuned
+    decision threshold from the saved_models directory on startup."""
+    global model, feature_cols, decision_threshold
+
+    if not os.path.exists(FEATURE_COLS_PATH):
+        logger.warning(
+            f"No feature columns file found at '{FEATURE_COLS_PATH}'. "
+            "The /predict endpoint will return errors until training artifacts are available."
+        )
+        return
+
+    feature_cols = joblib.load(FEATURE_COLS_PATH)
+    logger.info(f"Loaded {len(feature_cols)} feature columns.")
 
     if not os.path.exists(MODEL_PATH):
         logger.warning(
@@ -47,37 +57,35 @@ def load_model():
         return
 
     logger.info(f"Loading model checkpoint from '{MODEL_PATH}'...")
-    loaded_model = StreamingMultimodalTransformer(
-        ts_features=TS_FEATURES,
-        num_features=NUM_FEATURES,
-    ).to(device)
-    loaded_model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    loaded_model = TabularSequenceTransformer(num_features=len(feature_cols)).to(device)
+    loaded_model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     loaded_model.eval()
 
     model = loaded_model
     logger.info(f"Model loaded successfully on device: {device}")
+
+    if os.path.exists(THRESHOLD_PATH):
+        decision_threshold = joblib.load(THRESHOLD_PATH)
+        logger.info(f"Loaded tuned decision threshold: {decision_threshold:.4f}")
+    else:
+        logger.info(f"No tuned threshold found; defaulting to {decision_threshold}")
 
 
 # ==========================================
 # Request / Response Schemas
 # ==========================================
 class PredictionInput(BaseModel):
-    timeseries: List[List[float]] = Field(
-        ..., description=f"Shape [{SEQUENCE_LENGTH}, {TS_FEATURES}] sensor time-series window"
-    )
-    numerical: List[float] = Field(
-        ..., description=f"Length {NUM_FEATURES} numerical feature vector"
-    )
-    image: List[List[List[float]]] = Field(
-        ..., description=f"Shape {list(IMG_SIZE)} image tensor (C, H, W)"
+    features: List[List[float]] = Field(
+        ..., description=f"Shape [{SEQUENCE_LENGTH}, num_features] sensor sequence window, "
+                          "columns must match the training feature order"
     )
 
 
 class PredictionOutput(BaseModel):
     status: str
     failure_probability: float
-    predicted_ttf_hours: float
     maintenance_required: bool
+    decision_threshold: float
 
 
 # ==========================================
@@ -90,26 +98,15 @@ def sanitize_value(value: float) -> float:
     return value
 
 
-def validate_shapes(data: PredictionInput):
-    if len(data.timeseries) != SEQUENCE_LENGTH or any(
-        len(row) != TS_FEATURES for row in data.timeseries
+def validate_shape(data: PredictionInput):
+    if feature_cols is None:
+        raise HTTPException(status_code=503, detail="Feature columns not loaded.")
+    if len(data.features) != SEQUENCE_LENGTH or any(
+        len(row) != len(feature_cols) for row in data.features
     ):
         raise HTTPException(
             status_code=400,
-            detail=f"timeseries must have shape [{SEQUENCE_LENGTH}, {TS_FEATURES}]",
-        )
-    if len(data.numerical) != NUM_FEATURES:
-        raise HTTPException(
-            status_code=400, detail=f"numerical must have length {NUM_FEATURES}"
-        )
-    expected_c, expected_h, expected_w = IMG_SIZE
-    if (
-        len(data.image) != expected_c
-        or any(len(row) != expected_h for row in data.image)
-        or any(len(px) != expected_w for row in data.image for px in row)
-    ):
-        raise HTTPException(
-            status_code=400, detail=f"image must have shape {list(IMG_SIZE)}"
+            detail=f"features must have shape [{SEQUENCE_LENGTH}, {len(feature_cols)}]",
         )
 
 
@@ -140,26 +137,22 @@ def predict(data: PredictionInput):
             detail=f"Model not loaded. Expected checkpoint at '{MODEL_PATH}'.",
         )
 
-    validate_shapes(data)
+    validate_shape(data)
 
     try:
-        ts_tensor = torch.tensor([data.timeseries], dtype=torch.float32).to(device)
-        num_tensor = torch.tensor([data.numerical], dtype=torch.float32).to(device)
-        img_tensor = torch.tensor([data.image], dtype=torch.float32).to(device)
+        features_tensor = torch.tensor([data.features], dtype=torch.float32).to(device)
 
         with torch.no_grad():
-            logits, ttf_pred = model(ts_tensor, num_tensor, img_tensor)
+            logits = model(features_tensor)
             probability = torch.sigmoid(logits).item()
-            ttf_hours = ttf_pred.item()
 
         probability = sanitize_value(probability)
-        ttf_hours = sanitize_value(ttf_hours)
 
         return PredictionOutput(
             status="Success",
             failure_probability=round(probability, 4),
-            predicted_ttf_hours=round(ttf_hours, 2),
-            maintenance_required=probability >= 0.5,
+            maintenance_required=probability >= decision_threshold,
+            decision_threshold=round(decision_threshold, 4),
         )
 
     except Exception as e:
