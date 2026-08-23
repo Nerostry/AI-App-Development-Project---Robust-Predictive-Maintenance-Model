@@ -36,6 +36,8 @@ print("🤖 Loading YOLO Object Detection model...")
 model = YOLO('yolov8n.pt')  # Downloads lightweight pre-trained model on first run
 
 # 3. Connect to Kafka
+kafka_broker = os.getenv("KAFKA_BROKER", "localhost:9092")
+
 consumer = KafkaConsumer(
     'raw-dataset-events',
     bootstrap_servers=['localhost:9092'],
