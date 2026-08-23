@@ -1,3 +1,5 @@
+<img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/8949b0a1-f8e6-4daa-8343-e990d062f2f3" />
+<img width="614" height="797" alt="6077950092389323038" src="https://github.com/user-attachments/assets/bcb1dc09-956b-4328-b6df-0b4b32a59464" />
 # AI App Development Project: Robust Predictive Maintenance Model
 
 Welcome to the **Robust Predictive Maintenance Model** repository. This project delivers a scalable, end-to-end machine learning application that predicts maintenance needs. It features a robust data pipeline for seamless data ingestion, a trained predictive model, and a containerized microservices architecture for easy deployment.
